@@ -23,24 +23,15 @@ Each later run updates the notes in place and prints a short summary of what cha
 
 ## Install
 
-Pick one.
-
-**Paste a prompt.** Copy [prompt/easel-prompt.md](prompt/easel-prompt.md) into Claude Code. Change the three lines at the top to your Canvas address, your unit codes and your notes folder. Claude installs easel and runs it.
-
-**Install the skill.** Run this command once:
-
-```bash
-npx skills add adamalshoomary/easel -g
-```
-
-**Install the Claude Code plugin.** Run these two commands in Claude Code:
+**1. Paste this into Claude Code.** This is the easiest way.
 
 ```
-/plugin marketplace add adamalshoomary/easel
-/plugin install easel@easel
+Install easel from https://github.com/adamalshoomary/easel and run it for me.
 ```
 
-**Install without Node.** On macOS or Linux:
+Claude installs easel, asks for your Canvas address and unit codes, then makes your notes.
+
+**2. Or run one command.** On macOS or Linux, in Terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/adamalshoomary/easel/main/install.sh | sh
@@ -52,7 +43,29 @@ On Windows, in PowerShell:
 irm https://raw.githubusercontent.com/adamalshoomary/easel/main/install.ps1 | iex
 ```
 
-**No access to GitHub?** Each release has an offline prompt that carries easel inside it. Paste it into Claude Code.
+Then go to [Use](#use).
+
+**3. Or paste the full prompt.** Copy [prompt/easel-prompt.md](prompt/easel-prompt.md) into Claude Code. Change the three lines at the top to your Canvas address, your unit codes and your notes folder.
+
+<details>
+<summary>Other ways to install</summary>
+
+**With Node.js**, on any system:
+
+```bash
+npx skills add adamalshoomary/easel -g
+```
+
+**As a Claude Code plugin.** Type these two commands in Claude Code:
+
+```
+/plugin marketplace add adamalshoomary/easel
+/plugin install easel@easel
+```
+
+**Without GitHub access.** Download `easel-offline-prompt.md` from the [latest release](https://github.com/adamalshoomary/easel/releases/latest). Paste it into Claude Code. The prompt holds all of easel.
+
+</details>
 
 ## Use
 
@@ -117,6 +130,19 @@ Each run checks GitHub once for a newer version. If one exists, easel installs i
 ## Moving from the v3 prompt
 
 The first easel run on a v3 unit folder zips the v3 notes into `.easel/backups`, then rebuilds them in the new layout. Notes you edited by hand stay as they are. Your files stay where they are.
+
+## For agents
+
+Follow these steps if a user asks you to install easel from this page.
+
+1. If `~/.claude/skills/easel/SKILL.md` exists, go to step 4.
+2. On macOS or Linux, run `curl -fsSL https://raw.githubusercontent.com/adamalshoomary/easel/main/install.sh | sh`.
+3. On Windows, run `powershell -NoProfile -Command "irm https://raw.githubusercontent.com/adamalshoomary/easel/main/install.ps1 | iex"`.
+4. Ask the user for their Canvas address and their unit codes, in one question.
+5. Read `~/.claude/skills/easel/SKILL.md`. In it, the kit is `~/.claude/skills/easel`.
+6. Follow `SKILL.md` with the two values from step 4. Use the current folder as the notes folder.
+
+If the user asked only to install, stop after step 3 and tell them to type `/easel` with their unit codes.
 
 ## Licence
 
