@@ -1,6 +1,23 @@
+<div align="center">
+
 # easel
 
-easel copies your Canvas units into Markdown notes: weeks, assessments, rubrics, marks, feedback and grades. It runs in Claude Code and reads Canvas through your own Chrome.
+**Your Canvas units, as clean Markdown notes.**
+
+Weeks, assessments, rubrics, marks, feedback and grades, in one folder per unit.
+
+[![Release](https://img.shields.io/github/v/release/adamalshoomary/easel?label=release&color=2b6cb0)](https://github.com/adamalshoomary/easel/releases/latest)
+[![Tests](https://img.shields.io/github/actions/workflow/status/adamalshoomary/easel/test.yml?label=tests)](https://github.com/adamalshoomary/easel/actions/workflows/test.yml)
+[![Licence](https://img.shields.io/github/license/adamalshoomary/easel?color=718096)](LICENSE)
+
+</div>
+
+https://github.com/user-attachments/assets/f1512e3e-4c7e-4c2a-9b41-571083998323
+
+<p align="center">
+<b>5 units in 81 seconds</b> &nbsp;·&nbsp; <b>1% of a Pro plan's 5-hour limit</b><br>
+<sub>A real run on five QUT units. The wait plays at 5× speed.</sub>
+</p>
 
 You need Claude Code on a paid plan, the [Claude in Chrome extension](https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn) and Python 3.8 or newer.
 
