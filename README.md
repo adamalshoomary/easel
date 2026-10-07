@@ -1,25 +1,8 @@
 # easel
 
-easel copies your Canvas units into Markdown notes on your own computer. Claude does the work in your own Chrome, signed in as you, so it sees exactly what you see on Canvas. You get one folder per unit, ready for Obsidian, VS Code or any Markdown app.
+easel copies your Canvas units into Markdown notes: weeks, assessments, rubrics, marks, feedback and grades. It runs in Claude Code and reads Canvas through your own Chrome.
 
-## What you get
-
-For each unit:
-
-- **One note per week**, with every page, file, quiz and discussion from that week's modules.
-- **One note per assessment**: the brief, the due date, the weight, the rubric, the files you submitted, your mark, the rubric level you reached on each criterion, your marker's comments, and every annotation your marker left on your file, with the marked-up PDF beside it.
-- **A Grades note**: your average on marked work, the share of the unit you have already secured, and the mark you need on the remaining work for each grade. It follows the weights and drop rules on the Canvas Grades tab and your university's grade scale.
-- **Course info**: teaching staff and their roles, your groups, links to the unit's Canvas tools, the syllabus, every announcement, and Inbox messages from staff.
-- **Files** in folders beside the notes that link them. Logos, banners and other page images stay on Canvas.
-
-Each later run updates the notes in place and prints a short summary of what changed: new announcements, released marks, changed weeks, new feedback. Anything you write under the **My notes** heading at the bottom of a note survives every update. A note you have edited anywhere else stays exactly as you left it.
-
-## What you need
-
-- Claude Code (the desktop app, the terminal or VS Code), signed in with a Claude Pro, Max, Team or Enterprise plan.
-- The [Claude in Chrome extension](https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn), in Chrome, Edge, Brave, Arc, Vivaldi or Opera.
-- Python 3.8 or newer. Most Macs and Linux computers have it. On Windows, easel offers to install it.
-- A Canvas account at any university that uses Canvas.
+You need Claude Code on a paid plan, the [Claude in Chrome extension](https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn) and Python 3.8 or newer.
 
 ## Install
 
@@ -66,6 +49,24 @@ npx skills add adamalshoomary/easel -g
 **Without GitHub access.** Download `easel-offline-prompt.md` from the [latest release](https://github.com/adamalshoomary/easel/releases/latest). Paste it into Claude Code. The prompt holds all of easel.
 
 </details>
+
+## What you get
+
+One folder per unit, ready for Obsidian, VS Code or any Markdown app:
+
+- **Weeks:** one note per week, with every page, file, quiz and discussion.
+- **Assessments:** one note each, with the brief, due date, weight, rubric, your files, your mark, the rubric levels you reached, marker comments and the marked-up PDF.
+- **Grades:** your average so far and the mark you need on the remaining work for each grade.
+- **Course info:** staff, groups, the syllabus, announcements and Inbox messages from staff.
+
+Later runs update the notes and list what changed. Anything you write under **My notes** in a note stays. A note you edit anywhere else stays as you left it.
+
+## What you need
+
+- Claude Code (the desktop app, the terminal or VS Code), signed in with a Claude Pro, Max, Team or Enterprise plan.
+- The Claude in Chrome extension, in Chrome, Edge, Brave, Arc, Vivaldi or Opera.
+- Python 3.8 or newer. Most Macs and Linux computers have it. On Windows, easel offers to install it.
+- A Canvas account at any university that uses Canvas.
 
 ## Use
 
