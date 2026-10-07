@@ -1,0 +1,13 @@
+{
+  "name": "easel",
+  "description": "Copies Canvas LMS units into organised Markdown notes: weeks, assessments with rubrics, marks, marker comments and annotated feedback PDFs, and a Grades note with the mark needed for each grade.",
+  "version": "4.0.0",
+  "author": {
+    "name": "Adam Al Shoomary",
+    "url": "https://github.com/adamalshoomary"
+  },
+  "homepage": "https://github.com/adamalshoomary/easel",
+  "repository": "https://github.com/adamalshoomary/easel",
+  "license": "MIT",
+  "keywords": ["canvas", "canvas-lms", "obsidian", "notes", "students", "university", "markdown", "claude-code"]
+}

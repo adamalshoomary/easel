@@ -1,0 +1,32 @@
+# The handoff system stays on this machine and out of the published repository.
+# Code and product files push as normal; the agent scaffolding does not.
+AGENTS.md
+current-state.md
+project-purpose.md
+improvement-plan.md
+project-context/
+.claude/
+
+# These files then travel by file sync, meaning iCloud Drive, Dropbox or whatever
+# keeps this folder on your other machines. Two consequences follow, and both are
+# real. A collaborator who clones from the remote receives none of it, so they start
+# by running setup themselves. And an agent on another machine sees the current
+# state only once sync has finished, so check that before you ask one to continue.
+
+# Team mode. Uncomment the four state files below to commit them instead, so that
+# teammates and other machines receive the queue and the current state through the
+# repository. Note that current-state.md carries the plain-language explanation of the
+# last finished item, so sharing it shares that too.
+# !AGENTS.md
+# !current-state.md
+# !project-purpose.md
+# !improvement-plan.md
+
+.DS_Store
+
+# Python caches and local test output
+__pycache__/
+*.pyc
+tests/out/
+
+dist/
