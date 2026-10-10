@@ -37,7 +37,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 REPO = "adamalshoomary/easel"
 # Updates come from the latest published release. EASEL_FROM points at another copy of the release files, for tests.
 RELEASE = (os.environ.get("EASEL_FROM") or "https://github.com/" + REPO + "/releases/latest/download").rstrip("/") + "/"

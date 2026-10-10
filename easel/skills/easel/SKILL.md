@@ -52,8 +52,9 @@ PY "<kit>/scripts/easel.py" start <UNIT CODES> --canvas "<CANVAS URL>" --root "<
 1. Load the browser tools with one ToolSearch call: `select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__browser_batch,mcp__claude-in-chrome__javascript_tool,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__tabs_close_mcp,mcp__claude-in-chrome__list_connected_browsers`
 2. If ToolSearch returns none of these tools, go to "If the browser tools are missing".
 3. Call `tabs_context_mcp` with `createIfEmpty: true`. Use the tab that it returns.
-4. If the call fails, go to "If Chrome is not connected".
+4. If the call fails, call `list_connected_browsers`, then call `tabs_context_mcp` once more. If it fails again, go to "If Chrome is not connected".
 5. Make one `browser_batch` call with two actions: `navigate` the tab to the CANVAS URL, then `javascript_tool` with `action: "javascript_exec"` and the loader as the text.
+6. If Claude Code denies the call, go to "If Claude Code stops the browser step".
 
 The loader returns one of these results:
 
@@ -73,7 +74,7 @@ PY "<kit>/scripts/easel.py" wait
 The first word of the output tells you what to do:
 
 - `easel`: the run is finished. Go to step 5.
-- `VIEWER`: the tab is moving to Canvas's document viewer. Copy every line after `VIEWER_JS:` into one `javascript_tool` call on the tab. If the result starts with `NOT_READY`, wait 3 seconds and call it again, up to five times. Then run the wait command again. If the output also says that the browser asks where to save downloads, tell the user to click **Save** in that dialog.
+- `VIEWER`: the tab is moving to Canvas's document viewer. Copy every line after `VIEWER_JS:` into one `javascript_tool` call on the tab. If Claude Code denies the call, go to "If Claude Code stops the browser step". If the result starts with `NOT_READY`, wait 3 seconds and call it again, up to five times. Then run the wait command again. If the output also says that the browser asks where to save downloads, tell the user to click **Save** in that dialog.
 - `LOGIN`: go to "If Canvas asks the user to sign in".
 - `NOT_CONNECTED`: go to "If Chrome blocks the connection".
 - `STILL_RUNNING`: run the wait command again.
@@ -128,6 +129,15 @@ The Claude in Chrome extension is not enabled in this session.
 2. Never type a password, a code or any account detail for the user.
 3. Every 15 seconds, run `javascript_tool` on the tab with this text: `location.origin`. Do this up to 40 times.
 4. When the result equals the CANVAS URL, run the loader again with `javascript_tool`. Then go to step 4.
+
+## If Claude Code stops the browser step
+
+Claude Code's safety check can deny the loader or the viewer script. The denial can name a rule, such as "Browser JS Exfil".
+
+1. Do not run the script again. Do not try another way to reach Canvas.
+2. Close the tab with `tabs_close_mcp`.
+3. Tell the user: "Claude Code's safety check stopped the browser step. Open a new chat in your notes folder. Run the same /easel command in the new chat."
+4. Stop. The helper closes by itself after 30 minutes.
 
 ## If Chrome blocks the connection
 
