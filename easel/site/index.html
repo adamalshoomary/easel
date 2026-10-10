@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Install easel</title>
+<meta name="description" content="Your Canvas units, as clean Markdown notes. Open Claude Code with the install line typed in, then press Enter.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="easel">
+<meta property="og:description" content="Your Canvas units, as clean Markdown notes.">
+<meta property="og:url" content="https://adamalshoomary.github.io/easel/">
+<meta property="og:image" content="https://adamalshoomary.github.io/easel/card.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23b5532e'/%3E%3Ctext x='16' y='23' font-family='Helvetica,Arial,sans-serif' font-size='20' font-weight='700' fill='white' text-anchor='middle'%3Ee%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #faf8f5; --fg: #1f2328; --muted: #59636e; --panel: #ffffff; --line: #e4dfd7;
+    --accent: #b5532e; --accent-fg: #ffffff; --code: #f3efe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --fg: #e6e8eb; --muted: #9aa3ad; --panel: #171a20; --line: #2a2f37;
+      --accent: #e07a52; --accent-fg: #14161a; --code: #1e222a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 56px 20px 40px; }
+  h1 { font-size: 52px; line-height: 1; letter-spacing: -0.03em; margin: 0 0 12px; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 10px; }
+  .lead { font-size: 20px; margin: 0 0 32px; color: var(--fg); }
+  .buttons { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 12px; }
+  .btn {
+    display: inline-block; padding: 13px 20px; border-radius: 10px; font-weight: 600; text-decoration: none;
+    border: 1px solid var(--line); color: var(--fg); background: var(--panel);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  .btn:hover { filter: brightness(1.06); }
+  .btn:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .hint { color: var(--muted); margin: 0 0 32px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin: 0 0 16px; }
+  section p { margin: 0 0 10px; }
+  .copy { display: flex; gap: 8px; align-items: stretch; }
+  code, pre { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .copy code, pre {
+    flex: 1; background: var(--code); border-radius: 8px; padding: 10px 12px; margin: 0;
+    overflow-x: auto; white-space: nowrap;
+  }
+  button {
+    font: inherit; font-weight: 600; padding: 0 16px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  }
+  .copy code { white-space: normal; overflow-wrap: anywhere; }
+  .tree { white-space: pre; }
+  .needs, footer { color: var(--muted); font-size: 14px; }
+  footer { margin-top: 28px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>easel</h1>
+  <p class="lead">Your Canvas units, as clean Markdown notes.</p>
+
+  <div class="buttons">
+    <a class="btn primary" href="claude://code/new?q=Install%20easel%20from%20https%3A%2F%2Fgithub.com%2Fadamalshoomary%2Feasel.">Open in the Claude app</a>
+    <a class="btn" href="claude-cli://open?q=Install%20easel%20from%20https%3A%2F%2Fgithub.com%2Fadamalshoomary%2Feasel.">Open in a terminal</a>
+  </div>
+  <p class="hint">Claude Code opens with the install line typed in. Press Enter to install easel.</p>
+
+  <section>
+    <p>If nothing opens, paste this line into Claude Code:</p>
+    <div class="copy">
+      <code id="line">Install easel from https://github.com/adamalshoomary/easel.</code>
+      <button id="copy" type="button">Copy</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Then</h2>
+    <p>Open a new Claude Code chat in your notes folder. Then run this command with your own unit codes and Canvas address:</p>
+    <pre>/easel IFB201 IFB220 --canvas https://canvas.qut.edu.au</pre>
+  </section>
+
+  <section>
+    <h2>Each unit gets one folder</h2>
+    <pre class="tree">IFB220 Introduction to AI/
+├── INDEX.md
+├── 1 Course Info/
+├── 2 Assessments/
+├── 3 Weeks/
+└── Files/</pre>
+  </section>
+
+  <p class="needs">You need Claude Code on a paid plan, the Claude in Chrome extension and Python 3.8 or newer.</p>
+  <footer><a href="https://github.com/adamalshoomary/easel">easel on GitHub</a> · MIT licence</footer>
+</main>
+<script>
+  document.getElementById("copy").addEventListener("click", async (e) => {
+    const text = document.getElementById("line").textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      e.target.textContent = "Copied";
+    } catch (err) {
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById("line"));
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      e.target.textContent = /Mac/.test(navigator.platform) ? "Press Cmd+C" : "Press Ctrl+C";
+    }
+    setTimeout(() => { e.target.textContent = "Copy"; }, 2000);
+  });
+</script>
+</body>
+</html>

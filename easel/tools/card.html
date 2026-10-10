@@ -1,0 +1,55 @@
+<!doctype html>
+<!--
+  Source of easel/site/card.png, the 1280x640 link preview card.
+  GitHub shows it when someone shares the repository link (Settings, Social preview).
+  The install page uses it as og:image.
+
+  To render it again on macOS, run from the repository root:
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --disable-gpu --hide-scrollbars \
+    --force-device-scale-factor=1 --window-size=1280,640 --user-data-dir="$(mktemp -d)" \
+    --screenshot=easel/site/card.png "file://$PWD/easel/tools/card.html"
+  Chrome can keep running after it writes the file. Stop it with Ctrl+C.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    background: #faf8f5; color: #1f2328; display: flex; align-items: center; gap: 56px; padding: 0 80px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  .left { flex: 1.15; }
+  h1 { font-size: 112px; line-height: 1; letter-spacing: -0.04em; font-weight: 800; }
+  .tag { font-size: 34px; line-height: 1.25; margin: 18px 0 36px; color: #3b434c; }
+  .label { font-size: 21px; font-weight: 600; color: #b5532e; margin-bottom: 10px; letter-spacing: 0.01em; }
+  .paste {
+    font: 24px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #1f2328;
+    background: #ffffff; border: 2px solid #e4dfd7; border-left: 8px solid #b5532e; border-radius: 12px; padding: 18px 22px;
+  }
+  .right {
+    flex: 0.85; background: #ffffff; border: 2px solid #e4dfd7; border-radius: 18px; padding: 30px 32px;
+    font: 23px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace; color: #3b434c; white-space: pre;
+  }
+  .right b { color: #1f2328; }
+  .foot { position: absolute; bottom: 34px; left: 80px; font-size: 20px; color: #59636e; }
+</style>
+</head>
+<body>
+  <div class="left">
+    <h1>easel</h1>
+    <p class="tag">Your Canvas units, as clean<br>Markdown notes.</p>
+    <p class="label">Paste into Claude Code:</p>
+    <p class="paste">Install easel from<br>github.com/adamalshoomary/easel</p>
+  </div>
+  <div class="right"><b>IFB220 Introduction to AI/</b>
+├── INDEX.md
+├── 1 Course Info/
+├── 2 Assessments/
+│   └── Grades.md
+├── 3 Weeks/
+└── Files/</div>
+  <p class="foot">Weeks · assessments · rubrics · marks · feedback · grades</p>
+</body>
+</html>

@@ -9,7 +9,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # ubuntu-latest becomes Ubuntu 26 from 2026-10-19, which may have no Python 3.8 builds.
+        os: [ubuntu-24.04, macos-latest, windows-latest]
         python: ["3.8", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -22,23 +23,43 @@ jobs:
           node-version: "22"
       - name: Check the browser scripts parse
         run: |
-          node -e "new Function(require('fs').readFileSync('skills/easel/scripts/scrape.js','utf8').replace('__CFG__','{}'))"
-          node -e "new Function('return ' + require('fs').readFileSync('skills/easel/scripts/viewer.js','utf8').replace(/^\/\/.*$/gm, ''))"
+          node -e "new Function(require('fs').readFileSync('easel/skills/easel/scripts/scrape.js','utf8').replace('__CFG__','{}'))"
+          node -e "new Function('return ' + require('fs').readFileSync('easel/skills/easel/scripts/viewer.js','utf8').replace(/^\/\/.*$/gm, ''))"
       - name: Run the tests
-        run: python -m unittest discover -s tests -v
-      # Both installers download easel from GitHub main, as they do for a student.
-      # install.sh runs from an empty folder, so it cannot find this clone and must download.
+        run: python -m unittest discover -s easel/tests -v
+      # The installers download the release files, as they do for a student. A local server answers
+      # the way GitHub releases do: a redirect, then the file as application/octet-stream.
       - name: Install with install.sh
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          python easel/tools/release_files.py "$RUNNER_TEMP/release" --serve 8765 &
+          for i in $(seq 1 40); do curl -fs http://127.0.0.1:8765/latest/download/VERSION >/dev/null && break; sleep 0.5; done
           cd "$RUNNER_TEMP"
-          sh < "$GITHUB_WORKSPACE/install.sh"
-          python "$GITHUB_WORKSPACE/tools/check_install.py"
-      - name: Install with install.ps1
+          curl -fsSL http://127.0.0.1:8765/latest/download/install.sh | EASEL_FROM=http://127.0.0.1:8765/latest/download sh
+          python "$GITHUB_WORKSPACE/easel/tools/check_install.py"
+      - name: Install with install.ps1 in Windows PowerShell 5.1
         if: runner.os == 'Windows'
         shell: powershell
         run: |
+          $server = Start-Process python -ArgumentList 'easel\tools\release_files.py', "$env:RUNNER_TEMP\release", '--serve', '8765' -PassThru -WindowStyle Hidden
+          for ($i = 0; $i -lt 40; $i++) { try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8765/latest/download/VERSION | Out-Null; break } catch { Start-Sleep -Milliseconds 500 } }
+          $env:EASEL_FROM = 'http://127.0.0.1:8765/latest/download'
+          irm http://127.0.0.1:8765/latest/download/install.ps1 | iex
+          python easel\tools\check_install.py
+          $code = $LASTEXITCODE
+          Stop-Process -Id $server.Id
+          exit $code
+      - name: Install with install.ps1 in PowerShell 7
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
           Remove-Item -Recurse -Force "$HOME\.claude\skills\easel", "$HOME\.agents\skills\easel" -ErrorAction SilentlyContinue
-          Get-Content -Raw "$env:GITHUB_WORKSPACE\install.ps1" | Invoke-Expression
-          python "$env:GITHUB_WORKSPACE\tools\check_install.py"
+          $server = Start-Process python -ArgumentList 'easel\tools\release_files.py', "$env:RUNNER_TEMP\release7", '--serve', '8766' -PassThru -WindowStyle Hidden
+          for ($i = 0; $i -lt 40; $i++) { try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8766/latest/download/VERSION | Out-Null; break } catch { Start-Sleep -Milliseconds 500 } }
+          $env:EASEL_FROM = 'http://127.0.0.1:8766/latest/download'
+          irm http://127.0.0.1:8766/latest/download/install.ps1 | iex
+          python easel\tools\check_install.py
+          $code = $LASTEXITCODE
+          Stop-Process -Id $server.Id
+          exit $code

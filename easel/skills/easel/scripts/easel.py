@@ -37,9 +37,13 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 REPO = "adamalshoomary/easel"
-RAW = "https://raw.githubusercontent.com/" + REPO + "/main/skills/easel/"
+# Updates come from the latest published release. EASEL_FROM points at another copy of the release files, for tests.
+RELEASE = (os.environ.get("EASEL_FROM") or "https://github.com/" + REPO + "/releases/latest/download").rstrip("/") + "/"
+# A release holds its files flat. This maps each release file to its place in the skill folder.
+KIT_FILES = {"VERSION": "VERSION", "SKILL.md": "SKILL.md", "easel.py": "scripts/easel.py",
+             "scrape.js": "scripts/scrape.js", "viewer.js": "scripts/viewer.js"}
 HERE = Path(__file__).resolve().parent     # the scripts folder
 KIT = HERE.parent                          # the skill folder: SKILL.md, VERSION, scripts/
 STATE = Path(os.environ.get("EASEL_HOME") or (Path.home() / ".easel"))
@@ -2200,29 +2204,29 @@ def loader_js(port, run_id):
 
 
 def check_update():
-    """Returns a one-line message. Installs a newer published version when one exists."""
+    """Returns a one-line message. Installs a newer published release when one exists."""
     if os.environ.get("EASEL_NO_UPDATE"):
         return None
     try:
-        with urllib.request.urlopen(RAW + "VERSION", timeout=4) as r:
+        with urllib.request.urlopen(RELEASE + "VERSION", timeout=4) as r:
             remote = r.read().decode("utf-8").strip()
     except Exception:
         return "Couldn't check for updates, carrying on with what you have."
     local = (KIT / "VERSION").read_text(encoding="utf-8").strip() if (KIT / "VERSION").exists() else VERSION
     if version_tuple(remote) <= version_tuple(local):
         return None
-    files = ["VERSION", "SKILL.md", "scripts/easel.py", "scripts/scrape.js", "scripts/viewer.js"]
-    tmp = Path(tempfile.mkdtemp(prefix="easel-update-"))
+    # Download into the skill folder itself: os.replace cannot move files from another disk, such as a Linux /tmp.
+    tmp = Path(tempfile.mkdtemp(prefix=".update-", dir=KIT))
     try:
-        for f in files:
-            dst = tmp / f
+        for name, rel in KIT_FILES.items():
+            dst = tmp / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
-            with urllib.request.urlopen(RAW + f, timeout=20) as r:
+            with urllib.request.urlopen(RELEASE + name, timeout=20) as r:
                 dst.write_bytes(r.read())
         compile((tmp / "scripts" / "easel.py").read_text(encoding="utf-8"), "easel.py", "exec")
-        for f in files:
-            (KIT / f).parent.mkdir(parents=True, exist_ok=True)
-            os.replace(tmp / f, KIT / f)
+        for rel in KIT_FILES.values():
+            (KIT / rel).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(tmp / rel, KIT / rel)
     except Exception as e:
         return f"An update to {remote.split()[0]} exists but failed to install ({e.__class__.__name__}). Carrying on with {local.split()[0]}."
     finally:
@@ -2291,7 +2295,8 @@ def cmd_start(args):
             v3 = " (v3 folder: backup, then migrate)" if u.old_format == 3 else ""
             print(f"{u.code}: {u.mode} -> {u.target}{v3}")
         else:
-            print(f"{u.code}: new folder -> {root / (u.code + ' <course name>')}")
+            # No placeholder path here: an agent once reported "<course name>" to the student as the real folder name.
+            print(f"{u.code}: new folder in {root}, named after the course")
     print("LOADER: " + loader_js(port, run_id))
     return port
 

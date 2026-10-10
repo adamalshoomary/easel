@@ -1,6 +1,6 @@
 """Offline tests for the easel helper. They use made-up Canvas data and run on macOS, Windows and Linux.
 
-    python -m unittest discover -s tests -v
+    python -m unittest discover -s easel/tests -v
 """
 import base64
 import copy
@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
@@ -23,6 +24,9 @@ os.environ["EASEL_NO_UPDATE"] = "1"
 TMP_HOME = tempfile.mkdtemp(prefix="easel-test-home-")
 os.environ["EASEL_HOME"] = TMP_HOME
 import easel  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "tools"))
+import release_files  # noqa: E402
 
 ORIGIN = "https://canvas.example.edu"
 PDF = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
@@ -142,10 +146,6 @@ class Helpers(unittest.TestCase):
     def test_versions_agree(self):
         v = (ROOT / "skills" / "easel" / "VERSION").read_text(encoding="utf-8").split()[0]
         self.assertEqual(v, easel.VERSION)
-        for f in (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json"):
-            data = json.loads((ROOT / f).read_text(encoding="utf-8"))
-            found = data.get("version") or data["plugins"][0]["version"]
-            self.assertEqual(found, v, f)
 
     def test_yaml(self):
         self.assertEqual(easel.yaml_val("marked"), "marked")
@@ -383,6 +383,47 @@ class Server(unittest.TestCase):
         finally:
             proc.wait(timeout=30) if proc.poll() is None else None
             shutil.rmtree(root, ignore_errors=True)
+
+
+class Updates(unittest.TestCase):
+    """The helper updates itself from the latest release, served here the way GitHub serves it."""
+
+    def run_update(self, kit, base):
+        env = {k: v for k, v in os.environ.items() if k != "EASEL_NO_UPDATE"}
+        env.update(EASEL_HOME=TMP_HOME, EASEL_FROM=base)
+        return subprocess.run([sys.executable, str(kit / "scripts" / "easel.py"), "update"], env=env,
+                              capture_output=True, text=True, encoding="utf-8", timeout=60).stdout
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="easel-update-test-"))
+        self.kit = self.tmp / "kit"
+        shutil.copytree(ROOT / "skills" / "easel", self.kit, ignore=shutil.ignore_patterns("__pycache__"))
+        self.release = release_files.stage(self.tmp / "release")
+        self.httpd = release_files.server(self.release, 0)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}/latest/download"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_update_from_newer_release(self):
+        (self.release / "VERSION").write_text("9.9.9 (test)\n", encoding="utf-8")
+        helper = (self.release / "easel.py").read_text(encoding="utf-8")
+        (self.release / "easel.py").write_text(helper.replace('VERSION = "', '# updated in test\nVERSION = "', 1), encoding="utf-8")
+        out = self.run_update(self.kit, self.base)
+        self.assertIn(f"easel updated from {easel.VERSION} to 9.9.9.", out, out)
+        self.assertEqual((self.kit / "VERSION").read_text(encoding="utf-8"), "9.9.9 (test)\n")
+        self.assertIn("# updated in test", (self.kit / "scripts" / "easel.py").read_text(encoding="utf-8"))
+        self.assertEqual([p.name for p in self.kit.iterdir() if p.name.startswith(".update-")], [])
+        self.assertIn("is up to date", self.run_update(self.kit, self.base))
+
+    def test_missing_release_changes_nothing(self):
+        before = {p: p.read_bytes() for p in self.kit.rglob("*") if p.is_file()}
+        out = self.run_update(self.kit, self.base + "/missing")
+        self.assertIn("Couldn't check for updates", out, out)
+        self.assertEqual({p: p.read_bytes() for p in self.kit.rglob("*") if p.is_file()}, before)
 
 
 if __name__ == "__main__":

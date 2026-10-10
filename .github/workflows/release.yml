@@ -1,0 +1,38 @@
+name: release
+
+# When the owner publishes a release on github.com, this attaches the files that the installers
+# and the helper's update check download. Then it installs easel from the release to prove it.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Check that the tag matches VERSION
+        run: |
+          want="v$(cut -d' ' -f1 easel/skills/easel/VERSION)"
+          if [ "$TAG" != "$want" ]; then
+            echo "The release tag is $TAG, but easel/skills/easel/VERSION says $want. Change one of them, then publish again." >&2
+            exit 1
+          fi
+      - name: Attach the release files
+        run: |
+          python3 easel/tools/release_files.py "$RUNNER_TEMP/release"
+          gh release upload "$TAG" "$RUNNER_TEMP"/release/* --clobber --repo "$GITHUB_REPOSITORY"
+      - name: Install easel from this release
+        run: |
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          cd "$RUNNER_TEMP"
+          curl -fsSL "$base/install.sh" | EASEL_FROM="$base" sh
+          python3 "$GITHUB_WORKSPACE/easel/tools/check_install.py"

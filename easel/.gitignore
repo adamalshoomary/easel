@@ -1,0 +1,6 @@
+.DS_Store
+
+# Python caches and local test output
+__pycache__/
+*.pyc
+tests/out/
