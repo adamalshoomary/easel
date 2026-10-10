@@ -26,5 +26,19 @@ jobs:
           node -e "new Function('return ' + require('fs').readFileSync('skills/easel/scripts/viewer.js','utf8').replace(/^\/\/.*$/gm, ''))"
       - name: Run the tests
         run: python -m unittest discover -s tests -v
-      - name: Build the offline prompt
-        run: python tools/build_offline_prompt.py
+      # Both installers download easel from GitHub main, as they do for a student.
+      # install.sh runs from an empty folder, so it cannot find this clone and must download.
+      - name: Install with install.sh
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          sh < "$GITHUB_WORKSPACE/install.sh"
+          python "$GITHUB_WORKSPACE/tools/check_install.py"
+      - name: Install with install.ps1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Remove-Item -Recurse -Force "$HOME\.claude\skills\easel", "$HOME\.agents\skills\easel" -ErrorAction SilentlyContinue
+          Get-Content -Raw "$env:GITHUB_WORKSPACE\install.ps1" | Invoke-Expression
+          python "$env:GITHUB_WORKSPACE\tools\check_install.py"
