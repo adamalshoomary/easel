@@ -11,6 +11,8 @@ Commands:
   viewer-js
   scale --canvas URL --set "7:85,6:75,5:65,4:50"
   rebuild BUNDLE --target DIR
+  refresh UNITS [--root DIR] [--reset-edited]
+  update
   version
 
 Python 3.8 or newer, standard library only. Runs on macOS, Windows and Linux.
@@ -38,7 +40,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "4.4.0"
+VERSION = "4.5.0"
 REPO = "adamalshoomary/easel"
 # Updates come from the latest published release. EASEL_FROM points at another copy of the release files, for tests.
 RELEASE = (os.environ.get("EASEL_FROM") or "https://github.com/" + REPO + "/releases/latest/download").rstrip("/") + "/"
@@ -60,7 +62,8 @@ TZ = datetime.now().astimezone().tzinfo    # this computer's time zone
 NOW = datetime.now(TZ)
 TODAY = NOW.strftime("%Y-%m-%d")
 MANAGED = ["1 Course Info", "2 Assessments", "3 Weeks", "Files"]
-MANAGED_TOP = set(MANAGED) | {"INDEX.md", ".easel", ".canvas-manifest.json"}
+MANAGED_TOP = set(MANAGED) | {".easel", ".canvas-manifest.json"}
+INDEX_NAMES = ("INDEX.md", "easel INDEX.md")
 WEEK_RE = re.compile(r"^\s*weeks?\s*0*(\d{1,2})(?:\s*(?:-|–|—|to|&|and)\s*0*(\d{1,2}))?(?!\d)\s*[:\-–—|.,]?\s*(.*)$", re.I)
 ASSESS_RE = re.compile(r"assess|assignment|exam\b|portfolio", re.I)
 UNIT_PREFIX = re.compile(r"^\s*[A-Z]{2,5}\d{3,5}[A-Z]?(?:_\d\w*)?\s*[:\-–|_]?\s*")
@@ -337,9 +340,10 @@ def host_of(url):
 
 
 # ---------------------------------------------------------------- target folder
-def find_target(root: Path, unit: str):
+def find_target(root: Path, unit: str, host=None):
     """The unit folder is a folder whose name starts with the unit code. Look in the root, up to
-    4 levels below it, then beside it when the root is another unit's folder. Prefer folders with a manifest."""
+    4 levels below it, then beside it when the root is another unit's folder. Prefer a folder whose
+    manifest names this Canvas site, then any folder with a manifest."""
     code = unit.upper()
     if root.name.upper().startswith(code):
         return root
@@ -360,9 +364,11 @@ def find_target(root: Path, unit: str):
     if not hits:
         return None
 
-    def has_manifest(d):
-        return (d / ".easel" / "manifest.json").exists() or (d / ".canvas-manifest.json").exists()
-    hits.sort(key=lambda d: (has_manifest(d), d.stat().st_mtime), reverse=True)
+    def rank(d):
+        m, _, fmt = load_manifest(d)
+        same = bool(host and m.get("canvas") and host_of(m["canvas"]) == host)
+        return (same, fmt > 0, d.stat().st_mtime)
+    hits.sort(key=rank, reverse=True)
     return hits[0]
 
 
@@ -407,6 +413,7 @@ class Unit:
         self.result = {}
         self.ledger = None
         self.coverage_line = ""
+        self.incomplete, self.frozen, self.raw_status = [], set(), {}
 
     def cfg(self):
         return {"unit": self.code, "course_id": self.old.get("course_id")}
@@ -445,76 +452,161 @@ def band_of(scheme, fraction):
     return scheme["data"][-1][0] if scheme["data"] else None
 
 
+KNOWN_RULES = {"drop_lowest", "drop_highest", "never_drop"}
+
+
+def drop_assignments(items, rules):
+    """Canvas's drop rules, as its grade calculator applies them (AssignmentGroupGradeCalculator.ts).
+    items: [(score, possible, assignment id)]. Returns the ids to drop.
+    With unequal point values, Canvas keeps the set that gives the best group total (Kane and Kane,
+    "Dropping Lowest Grades"). With equal values, it drops the lowest scores."""
+    r = rules or {}
+    low, high = int(r.get("drop_lowest") or 0), int(r.get("drop_highest") or 0)
+    if not (low or high) or not items:
+        return set()
+    never = {str(x) for x in r.get("never_drop") or []}
+    cannot = [x for x in items if str(x[2]) in never]
+    droppable = [x for x in items if str(x[2]) not in never]
+    if not droppable:
+        return set()
+    low = min(low, len(droppable) - 1)
+    high = 0 if low + high >= len(droppable) else high
+    keep_highest = len(droppable) - low
+    keep_lowest = keep_highest - high
+    if any(x[1] > 0 for x in droppable):
+        max_total = max(x[1] for x in droppable)
+        kept = _keep_helper(droppable, keep_highest, False, cannot, max_total)
+        kept = _keep_helper(kept, keep_lowest, True, cannot, max_total)
+    else:
+        ordered = sorted(droppable, key=lambda x: (x[0], _num(x[2])))
+        kept = ordered[-keep_highest:][:keep_lowest]
+    kept_ids = {id(x) for x in kept}
+    return {x[2] for x in droppable if id(x) not in kept_ids}
+
+
+def _num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _keep_helper(subs, keep_count, asc, cannot, max_total):
+    keep_count = max(1, keep_count)
+    if len(subs) <= keep_count:
+        return subs
+    pointed = [x for x in subs + cannot if x[1] != 0]
+    unpointed = [x for x in subs + cannot if x[1] == 0]
+    grades = sorted(x[0] / x[1] for x in pointed)
+    if unpointed:
+        possible = sum(x[1] for x in pointed)
+        best = max(possible, sum(x[0] for x in pointed))
+        q_high = (best + sum(x[0] for x in unpointed)) / possible if possible else 0.0
+    else:
+        q_high = grades[-1] if grades else 0.0
+    q_low = grades[0] if grades else 0.0
+    q_mid = (q_low + q_high) / 2
+
+    def big_f(q):
+        rated = [(x[0] - q * x[1], x) for x in subs]
+        rated.sort(key=lambda t: (t[0], _num(t[1][2])) if asc else (-t[0], _num(t[1][2])))
+        kept = rated[:keep_count]
+        total = sum(t[0] for t in kept) + sum(x[0] - q * x[1] for x in cannot)
+        return total, [t[1] for t in kept]
+
+    x, kept = big_f(q_mid)
+    threshold = 1 / (2 * keep_count * max_total ** 2) if max_total else 0
+    while q_high - q_low >= threshold:
+        if x < 0:
+            q_high = q_mid
+        else:
+            q_low = q_mid
+        q_mid = (q_low + q_high) / 2
+        if q_mid == q_high or q_mid == q_low:
+            break
+        x, kept = big_f(q_mid)
+    return kept
+
+
 class Grades:
-    """Canvas's grade arithmetic: group weights, points, drop rules, excused and omitted work.
-    Canvas hides the unit total at some universities, so easel computes it and labels it as its own."""
+    """Canvas's grade arithmetic, as its own calculator does it: group weights, points, drop rules,
+    zero-point extra credit, excused and unmarked work. Canvas hides the unit total at some
+    universities, so easel computes it and labels it as its own."""
 
     def __init__(self, bundle):
         b = bundle
         self.weighted = bool(b.get("group_weights") or (b.get("course") or {}).get("apply_group_weights"))
         self.groups = []
+        self.unsupported = []
         by_group = {}
         for a in b.get("assignments") or []:
             if a.get("omit_from_final_grade") or a.get("published") is False:
                 continue
-            if a.get("grading_type") == "not_graded":
+            if a.get("grading_type") == "not_graded" or (a.get("submission_types") or []) == ["not_graded"]:
                 continue
             p = a.get("points_possible")
-            if not isinstance(p, (int, float)) or p <= 0:
+            if not isinstance(p, (int, float)) or p < 0:
                 continue
             s = a.get("submission") or {}
             if s.get("excused"):
                 continue
             score = s.get("score") if isinstance(s.get("score"), (int, float)) else None
+            if score is not None and s.get("workflow_state") == "pending_review":
+                score = None
             by_group.setdefault(a.get("assignment_group_id"), []).append({"a": a, "points": float(p), "score": score})
         for g in sorted(b.get("assignment_groups") or [], key=lambda g: g.get("position") or 0):
             items = by_group.pop(g["id"], [])
             w = g.get("group_weight") or 0
             if not items and not (self.weighted and w):
                 continue
-            self.groups.append({"g": g, "weight": float(w), "items": items, "rules": g.get("rules") or {}})
+            rules = g.get("rules") or {}
+            for k in rules:
+                if k not in KNOWN_RULES:
+                    self.unsupported.append(f"{g.get('name')}: rule {k}")
+            self.groups.append({"g": g, "weight": float(w), "items": items, "rules": rules})
         if by_group:   # assignments whose group Canvas did not list
             items = [x for v in by_group.values() for x in v]
             self.groups.append({"g": {"id": None, "name": "Other"}, "weight": 0.0, "items": items, "rules": {}})
 
-    def group_result(self, grp, fill):
-        """(earned, possible) for a group. fill=None leaves unmarked work out; a number counts it at that fraction."""
+    def group_items(self, grp, fill):
         items = []
         for it in grp["items"]:
             if it["score"] is not None:
                 items.append((it["score"], it["points"], it["a"]["id"]))
             elif fill is not None:
                 items.append((fill * it["points"], it["points"], it["a"]["id"]))
-        r = grp["rules"]
-        never = set(r.get("never_drop") or [])
-        droppable = sorted([x for x in items if x[2] not in never], key=lambda x: x[0] / x[1] if x[1] else 0)
-        low, high = int(r.get("drop_lowest") or 0), int(r.get("drop_highest") or 0)
-        if fill is not None:
-            unmarked_total = sum(1 for it in grp["items"] if it["score"] is None)
-            keep_room = len(grp["items"]) - unmarked_total
-            low = min(low, max(0, len(droppable) - 1))
-            _ = keep_room
-        else:
-            low = min(low, max(0, len(droppable) - 1))
-        high = min(high, max(0, len(droppable) - low - 1))
-        dropped = set(x[2] for x in droppable[:low]) | set(x[2] for x in droppable[len(droppable) - high:] if high)
+        return items
+
+    def group_result(self, grp, fill):
+        """(earned, possible) for a group after Canvas's drop rules. fill=None leaves unmarked work out;
+        a number counts it at that fraction of its points."""
+        items = self.group_items(grp, fill)
+        dropped = drop_assignments(items, grp["rules"])
         kept = [x for x in items if x[2] not in dropped]
         return sum(x[0] for x in kept), sum(x[1] for x in kept)
+
+    def dropped(self, grp):
+        """Ids of the marked assessments the drop rules leave out today."""
+        return drop_assignments(self.group_items(grp, None), grp["rules"])
 
     def total(self, fill=None, empty_fill=None):
         """Unit percentage as a fraction. fill: fraction for unmarked work (None = leave it out).
         empty_fill: fraction for weighted groups with no Canvas assessments yet (None = leave them out)."""
         if self.weighted:
-            num = den = 0.0
+            score = full_weight = 0.0
             for grp in self.groups:
                 e, p = self.group_result(grp, fill)
                 if p > 0:
-                    num += grp["weight"] * e / p
-                    den += grp["weight"]
+                    score += grp["weight"] * e / p
+                    full_weight += grp["weight"]
                 elif not grp["items"] and empty_fill is not None and grp["weight"]:
-                    num += grp["weight"] * empty_fill
-                    den += grp["weight"]
-            return (num / den) if den else None
+                    score += grp["weight"] * empty_fill
+                    full_weight += grp["weight"]
+            if not full_weight:
+                return None
+            if full_weight < 100:          # Canvas scales the marked groups up to 100; over 100 it does not
+                score = score * 100 / full_weight
+            return score / 100
         e = p = 0.0
         for grp in self.groups:
             ge, gp = self.group_result(grp, fill)
@@ -552,6 +644,8 @@ class Grades:
                     if self.weighted:
                         tot = sum(x["points"] for x in grp["items"])
                         wsum = sum(g["weight"] for g in self.groups if g["items"] or g["weight"])
+                        if wsum < 100:
+                            wsum = 100.0 if wsum else 0.0
                         return (grp["weight"] / wsum) * (it["points"] / tot) if tot and wsum else None
                     tot = sum(x["points"] for g in self.groups for x in g["items"])
                     return it["points"] / tot if tot else None
@@ -996,7 +1090,7 @@ class Planner:
             if len(outline) >= 4:
                 lead = "In this week" if g["kind"] == "week" else "In this module"
                 secs.insert(0, ("lead", f"> [!abstract] {lead}\n" + "\n".join(f"> - {cell(x)}" for x in outline)))
-            self.notes.append({"key": g["key"], "kind": g["kind"], "dir": g["dir"],
+            self.notes.append({"key": g["key"], "kind": g["kind"], "dir": g["dir"], "frozen": any(m.get("frozen") for m in g["modules"]),
                                "title": g["title"] if g["kind"] == "week" else g["title_numbered"],
                                "source": g["title"], "module_ids": [m["id"] for m in g["modules"]],
                                "slugs": {it["page_url"] for m in g["modules"] for it in m["items"] if it.get("page_url")},
@@ -1133,6 +1227,8 @@ class Planner:
             ("The figures below are easel's calculation from your released marks and the weights on the Canvas Grades tab, "
              "including drop rules. Canvas and your unit outline decide your real result.")
         head = [f"> [!note] {note}"]
+        if G.unsupported:
+            head.append("> [!warning] Canvas uses a grading rule easel does not know, so the figures below are not reliable: " + "; ".join(G.unsupported) + ".")
         if cur is not None:
             band = band_of(sc, cur)
             head.append(f"> [!success] Average on marked work so far: **{pct(cur)}**" + (f" · {band}" if band else ""))
@@ -1169,7 +1265,15 @@ class Planner:
             weight = f"{pts(grp['weight'])}%" if G.weighted else "by points"
             counted = f"{pts(e)} / {pts(p)}" if (e, p) != (raw_e, raw_p) else "all"
             rows.append(f"| {name} | {weight} | {marked} of {len(grp['items'])} | {pts(raw_e)} / {pts(raw_p)} | {counted} | {pct(e / p) if p else '-'} |")
-        out.append("## By group\n\n" + ("Canvas weights the unit total by group." if G.weighted else "Canvas adds up points across all assessments.") + "\n\n" + "\n".join(rows))
+        dropped_names = []
+        for grp in G.groups:
+            for aid in G.dropped(grp):
+                a = self.asg.get(aid)
+                if a:
+                    dropped_names.append(f"[{lbl(a['name'])}](NOTE:asg:{aid})")
+        out.append("## By group\n\n" + ("Canvas weights the unit total by group." if G.weighted else "Canvas adds up points across all assessments.")
+                   + " Extra credit with 0 points possible adds to your marks. easel does not read grading periods; if your unit weights them, Canvas's total can differ."
+                   + "\n\n" + "\n".join(rows) + (("\n\nDropped by the group rules today: " + ", ".join(dropped_names) + ".") if dropped_names else ""))
         checks = []
         for a in sorted(self.b.get("assignments") or [], key=asg_order):
             m = re.search(r"\((\d+(?:\.\d+)?)\s*%\)", a.get("name") or "")
@@ -1291,19 +1395,22 @@ class Planner:
                 if fid not in self.file_refs:
                     self.file_refs[fid] = note
                     order.append(fid)
+        # A file found by name and size alone is not proof of content. That lookup serves only v3 folders
+        # and --tidy, where files may have moved. A v4 folder knows its files from the manifest.
         disk = {}
-        if (T / "Files").is_dir():
+        if (T / "Files").is_dir() and (self.u.old_format == 3 or self.u.tidy):
             for f in (T / "Files").rglob("*"):
                 if f.is_file() and f.name != ".DS_Store":
                     try:
                         disk.setdefault((f.name, f.stat().st_size), f)
                     except OSError:
                         pass
-        old_paths = {}
+        old_paths, old_recs = {}, {}
         for f in self.u.old.get("files", []):
             p = f.get("path") or (str(Path(f["folder"] if str(f.get("folder", "")).startswith("Files") else "Files/" + f.get("folder", "")) / f["name"]) if f.get("name") else None)
             if p:
                 old_paths[str(f["id"])] = T / p
+                old_recs[str(f["id"])] = f
         claimed = set()
         for fid in order:
             meta = files.get(fid, {})
@@ -1330,17 +1437,29 @@ class Planner:
                 continue
             name, size = clean_file_name(meta["display_name"]), meta.get("size")
             canon = folder / name
-            op = old_paths.get(fid)
+            op, rec = old_paths.get(fid), old_recs.get(fid) or {}
             if op and op.exists():
-                if op.stat().st_size == size:
-                    self.fplan[fid] = self.tidy_file(op, canon, size) if self.u.tidy else {"action": "reuse", "path": op}
+                # Canvas's revision is its timestamp and size. The student's edits show as a hash that differs
+                # from the one recorded at download. Before 4.5.0 no hash was recorded: then a size that differs
+                # from the record is the only sign of an edit.
+                remote_changed = rec.get("updated_at") != meta.get("updated_at") or rec.get("size") != size
+                if not remote_changed:
+                    plan = self.tidy_file(op, canon, size) if self.u.tidy else {"action": "reuse", "path": op}
+                    plan["rec"] = rec
+                    self.fplan[fid] = plan
                     continue
-                canvas_t = (parse_dt(meta.get("updated_at")) or NOW).timestamp()
-                if canvas_t <= op.stat().st_mtime:
-                    self.fplan[fid] = {"action": "reuse", "path": op, "local_differs": True}
-                    continue
-                st, ext = os.path.splitext(op.name)
-                self.fplan[fid] = {"action": "download", "path": op.with_name(f"{st} (updated {TODAY}){ext}"), "changed": str(op)}
+                try:
+                    edited = file_sha(op) != rec["sha"] if rec.get("sha") else op.stat().st_size != rec.get("size")
+                except OSError:
+                    edited = True
+                if edited:
+                    st, ext = os.path.splitext(op.name)
+                    beside = op.with_name(f"{st} (Canvas {TODAY}){ext}")
+                    if beside.exists():
+                        beside = op.with_name(f"{st} (Canvas {TODAY})-{fid}{ext}")
+                    self.fplan[fid] = {"action": "download", "path": beside, "beside": str(op), "fallback": op, "rec": rec}
+                else:
+                    self.fplan[fid] = {"action": "download", "path": op, "replace": True, "fallback": op, "rec": rec}
                 continue
             if canon.exists() and canon.stat().st_size == size:
                 self.fplan[fid] = {"action": "reuse", "path": canon}
@@ -1408,9 +1527,12 @@ class Planner:
             prev = self.feedback.get(c["key"])
             graded = parse_dt(c.get("graded_at") or c.get("posted_at"))
             recent = graded and (NOW - graded) < timedelta(days=21)
-            stale_check = prev and (NOW - (parse_dt(prev.get("checked_at")) or NOW)) > timedelta(hours=20)
+            # checked_at is the last check that worked; attempted_at the last try of any kind.
+            last_try = parse_dt((prev or {}).get("attempted_at") or (prev or {}).get("checked_at")) or NOW
+            stale_check = prev and (NOW - last_try) > timedelta(hours=20)
+            failed = prev and prev.get("status") not in (None, "ok", "no annotations")
             if self.u.refresh_feedback or not prev or prev.get("graded_at") != c.get("graded_at") or \
-                    prev.get("posted_at") != c.get("posted_at") or (recent and stale_check):
+                    prev.get("posted_at") != c.get("posted_at") or (recent and stale_check) or (failed and stale_check):
                 keys.append(c["key"])
         return keys
 
@@ -1765,6 +1887,8 @@ def resolve_links(text, note_dir: Path, planner: Planner, received):
         label = label or meta.get("display_name") or f"file {fid}"
         label = label.replace("[", "(").replace("]", ")").replace("\n", " ")
         ok = p.get("action") == "reuse" or (p.get("action") == "download" and fid in received)
+        if not ok and p.get("fallback") and Path(p["fallback"]).exists():
+            return f"[{label}]({link_path(note_dir, Path(p['fallback']))})"
         if ok:
             x = planner.xplan.get(fid) or {}
             extra = ""
@@ -1799,6 +1923,8 @@ def resolve_links(text, note_dir: Path, planner: Planner, received):
 
 
 def note_body(note):
+    if note.get("body") is not None:
+        return note["body"]
     parts, prev = [], None
     for kind, s in note["secs"]:
         if not s:
@@ -1825,7 +1951,7 @@ def render_fm(items, user_blocks, updated):
     return "---\n" + "\n".join(lines) + "\n---\n\n"
 
 
-def write_note(unit, planner, note, received, old_sha, legacy_sha, was_edited=False):
+def write_note(unit, planner, note, received, old_sha, legacy_sha, was_edited=False, no_record_ok=False):
     """Write one note. Keep the student's frontmatter keys and the text under My notes.
     A note the student edited stays theirs on every later run, until they ask for --reset-edited.
     Returns 'new', 'written', 'unchanged' or 'edited'."""
@@ -1847,6 +1973,8 @@ def write_note(unit, planner, note, received, old_sha, legacy_sha, was_edited=Fa
             edited = not (raw_sha(cur) == legacy_sha or raw_sha(cur.replace("\r\n", "\n").replace("\r", "\n")) == legacy_sha or same_run)
             if cur_mine is not None:
                 edited = edited and sha(cur_gen) != legacy_sha
+        elif no_record_ok:
+            edited = False
         else:
             # No record of what easel wrote here: keep the file unless it already matches the Canvas version.
             edited = sha(cur_gen) != sha(gen)
@@ -1873,6 +2001,12 @@ def write_note(unit, planner, note, received, old_sha, legacy_sha, was_edited=Fa
             return "unchanged"
     text = render_fm(fm_items, user_blocks, TODAY) + gen + tail
     write_text(path, text)
+    if cur is not None:
+        # The student's text under My notes and their own properties must read back unchanged.
+        fm_new, body_new = split_frontmatter(read_text(path))
+        if normalize(split_my_notes(body_new)[1] or "") != normalize(cur_mine or "") or \
+                [ls for k, ls in fm_blocks(fm_new) if k not in OWNED_FM] != [ls for k, ls in user_blocks]:
+            unit.result.setdefault("personal_changed", []).append(path.name)
     return "written" if cur is not None else "new"
 
 
@@ -1884,7 +2018,7 @@ def check_links(T: Path):
         if not base.is_dir():
             continue
         for md in (base.glob("*.md") if d == "." else base.rglob("*.md")):
-            if d == "." and md.name != "INDEX.md":
+            if d == "." and not (md.name in INDEX_NAMES and index_is_ours(md)):
                 continue
             t = read_text(md)
             if re.search(r"\((?:FILE|NOTE|PATH):[^)]+\)", t) or TRANSCRIPT_RE.search(t):
@@ -1925,6 +2059,27 @@ def week_status(planner):
     return s
 
 
+def index_is_ours(p: Path):
+    """An index easel wrote: v4 says `easel: unit`; v3 wrote `title` and `scraped`."""
+    try:
+        fm, _ = split_frontmatter(read_text(p))
+    except Exception:
+        return False
+    return bool(fm) and (fm_value(fm, "easel") == "unit" or (fm_value(fm, "scraped") is not None and fm_value(fm, "title") is not None))
+
+
+def index_path(unit):
+    """Where this unit's index lives. A student's own INDEX.md is never touched: easel's goes to `easel INDEX.md`."""
+    T = unit.target
+    for n in unit.old.get("notes", []):
+        if n.get("key") == "index" and n.get("path"):
+            return T / n["path"]
+    p = T / "INDEX.md"
+    if p.exists() and not index_is_ours(p):
+        return T / "easel INDEX.md"
+    return p
+
+
 def write_index(unit, planner, last_update_lines):
     T, b, P = unit.target, unit.bundle, planner
     c = b["course"]
@@ -1958,12 +2113,23 @@ def write_index(unit, planner, last_update_lines):
                                                      for n in ns))
     if last_update_lines:
         lines.append("## Last update\n\n" + "\n".join(f"- {x}" for x in last_update_lines))
-    note = {"key": "index", "kind": "index", "title": c["name"], "secs": [], "path": T / "INDEX.md", "fm": fm}
-    body = "\n\n".join(lines) + "\n"
-    body = resolve_links(body, T, P, unit.received)
-    old_fm, _ = split_frontmatter(read_text(T / "INDEX.md")) if (T / "INDEX.md").exists() else (None, "")
-    user_blocks = [(k, ls) for k, ls in fm_blocks(old_fm) if k not in OWNED_FM and k != "title"]
-    write_text(T / "INDEX.md", render_fm(fm, user_blocks, TODAY) + body)
+    path = index_path(unit)
+    note = {"key": "index", "kind": "index", "title": c["name"], "secs": [], "path": path, "fm": fm, "module_ids": [], "count": 0,
+            "body": resolve_links("\n\n".join(lines) + "\n", T, P, unit.received)}
+    prev = next((n for n in unit.old.get("notes", []) if n.get("key") == "index"), None)
+    old_sha = prev.get("sha") if prev else None
+    if "index" in unit.frozen and path.exists():
+        note["gen_sha"], note["edited"] = old_sha, bool(prev and prev.get("edited"))
+        unit.result.setdefault("frozen", []).append(path.name)
+        unit.result["index"] = "frozen"
+        return note
+    st = write_note(unit, P, note, unit.received, old_sha, None, bool(prev and prev.get("edited")), no_record_ok=prev is None)
+    res = unit.result
+    res["index"] = st          # the index changes on most runs (its Last update line), so it stays out of "written"
+    if st == "edited":
+        res.setdefault("edited", []).append(path.name)
+    if path.name != "INDEX.md" and (T / "INDEX.md").exists():
+        res["own_index"] = True
     return note
 
 
@@ -2003,20 +2169,55 @@ def diff_changes(old, P, b):
 
 
 # ---------------------------------------------------------------- v3 migration
-def backup_v3(T: Path):
-    """Zip the v3 notes and manifest before v4 writes anything. Files/ is left in place: v4 does not move or delete it."""
+def backup_notes(T: Path, paths, label):
+    """Zip the given files under .easel/backups and read the zip back. Returns the zip path, or None
+    when the zip does not hold every file byte for byte. Nothing is deleted unless this returns a path."""
+    files = [Path(p) for p in paths if Path(p).is_file()]
+    if not files:
+        return None
     dest = T / ".easel" / "backups"
     dest.mkdir(parents=True, exist_ok=True)
-    z = dest / f"v3-notes-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
-    with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
-        for d in MANAGED[:3]:
-            for f in (T / d).rglob("*") if (T / d).is_dir() else []:
-                if f.is_file():
-                    zf.write(f, f.relative_to(T).as_posix())
-        for name in ("INDEX.md", ".canvas-manifest.json"):
-            if (T / name).exists():
-                zf.write(T / name, name)
+    z = dest / f"{label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    k = 2
+    while z.exists():
+        z = dest / f"{label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{k}.zip"
+        k += 1
+    with zipfile.ZipFile(lp(z), "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.write(lp(f), f.relative_to(T).as_posix())
+    try:
+        with zipfile.ZipFile(lp(z)) as zf:
+            if zf.testzip() is not None:
+                return None
+            for f in files:
+                if zf.read(f.relative_to(T).as_posix()) != Path(lp(f)).read_bytes():
+                    return None
+    except Exception:
+        return None
     return z
+
+
+def backup_v3(T: Path):
+    """Zip the v3 notes and manifest before v4 writes anything. Files/ is left in place: v4 does not move or delete it."""
+    paths = []
+    for d in MANAGED[:3]:
+        paths += [f for f in ((T / d).rglob("*") if (T / d).is_dir() else []) if f.is_file()]
+    paths += [T / name for name in ("INDEX.md", ".canvas-manifest.json") if (T / name).exists()]
+    return backup_notes(T, paths, "v3-notes")
+
+
+def pristine(e, prev, old_format):
+    """True when a note on disk is exactly what easel wrote: no text under My notes, no properties of the
+    student's own, and the generated part matches the recorded hash. Modification times prove nothing."""
+    if not prev or not prev.get("sha") or prev.get("edited"):
+        return False
+    fm, body = split_frontmatter(e["text"])
+    gen, mine = split_my_notes(body)
+    if (mine or "").strip() or any(k not in OWNED_FM for k, _ in fm_blocks(fm)):
+        return False
+    if old_format == 3:
+        return raw_sha(e["text"]) == prev["sha"] or raw_sha(e["text"].replace("\r\n", "\n").replace("\r", "\n")) == prev["sha"]
+    return sha(gen) == prev["sha"]
 
 
 # ---------------------------------------------------------------- finalize one unit
@@ -2025,9 +2226,11 @@ def finalize(unit: Unit, phase="main"):
     P, T, b = unit.plan, unit.target, unit.bundle
     res = unit.result
     if phase == "main":
-        res.update({"moved": 0, "renamed": 0, "removed": [], "written": [], "new": [], "edited": [], "backup": None})
+        res.update({"moved": 0, "renamed": 0, "removed": [], "kept_removed": [], "written": [], "new": [], "edited": [], "backup": None})
         if unit.old_format == 3 and not (T / ".easel" / "manifest.json").exists():
             res["backup"] = backup_v3(T)
+            if res["backup"] is None:
+                raise RuntimeError("the backup of the v3 notes could not be verified, so nothing was changed")
         for p in P.fplan.values():
             src = p.get("move_from")
             if src and Path(src).exists() and not Path(p["path"]).exists():
@@ -2049,11 +2252,12 @@ def finalize(unit: Unit, phase="main"):
             p = P.fplan[fid]
             dest = Path(p["path"])
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
+            if dest.exists() and not p.get("replace"):
                 st, ext = os.path.splitext(dest.name)
                 dest = dest.with_name(f"{st}-{fid}{ext}")
                 p["path"] = dest
-            shutil.move(str(src), lp(dest))
+            p["sha"] = file_sha(Path(src))
+            os.replace(lp(src), lp(dest)) if p.get("replace") and dest.exists() else shutil.move(str(src), lp(dest))
         plan_texts(unit, P)
     old_notes = {x.get("path"): x for x in unit.old.get("notes", [])}
     targets = P.notes if phase == "main" else [n for n in P.notes if n.get("asg_id") in unit.feedback_asg]
@@ -2061,6 +2265,10 @@ def finalize(unit: Unit, phase="main"):
         n["path"] = Path(n["path"])
         rel = n["path"].relative_to(T).as_posix()
         prev = old_notes.get(rel) or {}
+        if phase == "main" and n["path"].exists() and (n.get("frozen") or n["kind"] in unit.frozen or n["key"] in unit.frozen):
+            n["gen_sha"], n["edited"] = prev.get("sha"), bool(prev.get("edited"))
+            res.setdefault("frozen", []).append(n["path"].name)
+            continue
         if phase != "main":
             old_sha, legacy, was_edited = n.get("gen_sha"), None, n.get("edited", False)
         elif unit.old_format == 4:
@@ -2076,28 +2284,37 @@ def finalize(unit: Unit, phase="main"):
     if phase == "main":
         write_generated(unit, P, P.tplan, "transcripts")
         write_generated(unit, P, P.xplan, "texts")
-        # v3 notes that v4 replaces, such as "Assignments.md", go away when nobody edited them. The backup holds them.
+        # Notes whose module left Canvas, and v3 notes that v4 replaces. A note with the student's text,
+        # properties or edits stays where it is. A note that is exactly what easel wrote is zipped, the zip
+        # is read back, and only then is the note removed.
+        gone = []
         for e in P.stale:
             prev = old_notes.get(e["path"].relative_to(T).as_posix())
-            if prev and prev.get("sha") and (raw_sha(e["text"]) == prev["sha"] or abs(e["path"].stat().st_mtime - unit.manifest_mtime) < 120 or
-                                             sha(split_my_notes(split_frontmatter(e["text"])[1])[0]) == prev["sha"]):
-                if unit.old_format == 3 and res.get("backup") or unit.old_format == 4:
+            if pristine(e, prev, unit.old_format):
+                gone.append(e)
+            else:
+                res["kept_removed"].append(e["path"].name)
+        if gone:
+            z = backup_notes(T, [e["path"] for e in gone], "removed-notes")
+            if z is None:
+                res["kept_removed"] += [e["path"].name for e in gone]
+            else:
+                res["removed_backup"] = z
+                for e in gone:
                     e["path"].unlink()
                     res["removed"].append(e["path"].name)
     changes = diff_changes(unit.old, P, b) if unit.old else {}
     summary_lines = summary_for(unit, changes)
-    write_index(unit, P, [f"{TODAY}: " + "; ".join(summary_lines[1:]) if len(summary_lines) > 1 else f"{TODAY}: no changes on Canvas"])
+    index_note = write_index(unit, P, [f"{TODAY}: " + "; ".join(summary_lines[1:]) if len(summary_lines) > 1 else f"{TODAY}: no changes on Canvas"])
     manifest = {
         "version": 4, "easel": VERSION, "canvas": ORIGIN, "course_id": b["course"]["id"], "course_name": b["course"]["name"],
         "course_code": b["course"].get("course_code"), "scraped": TODAY, "scraped_at": b.get("scraped_at"),
         "notes": [{"key": n["key"], "path": Path(n["path"]).relative_to(T).as_posix(), "module_ids": n.get("module_ids") or [],
-                   "sections": n.get("count", 0), "sha": n.get("gen_sha"), **({"edited": True} if n.get("edited") else {})} for n in P.notes],
+                   "sections": n.get("count", 0), "sha": n.get("gen_sha"), **({"edited": True} if n.get("edited") else {})} for n in P.notes + [index_note]],
         "modules": [{"id": m["id"], "name": m["name"], "items": [{"key": it.get("page_url") or f"{it['type']}:{it.get('content_id')}",
                      "type": it["type"], "title": it["title"], "updated_at": it.get("updated_at")} for it in m["items"] if it["type"] != "SubHeader"]}
                     for m in b.get("modules") or []],
-        "files": [{"id": fid, "name": (b.get("files") or {}).get(fid, {}).get("display_name"), "path": Path(p["path"]).relative_to(T).as_posix(),
-                   "size": (b.get("files") or {}).get(fid, {}).get("size"), "updated_at": (b.get("files") or {}).get(fid, {}).get("updated_at")}
-                  for fid, p in P.fplan.items() if p.get("path") and (p["action"] == "reuse" or fid in unit.received)],
+        "files": file_records(unit, P),
         "announcements": [{"id": a["id"], "title": a["title"], "posted_at": a["posted_at"]} for a in b.get("announcements") or []],
         "assignments": [{"id": a["id"], "name": a["name"], "due_at": a.get("due_at"), "updated_at": a.get("updated_at"),
                          "rubric_criteria": len(a.get("rubric") or []), "graded": (a.get("submission") or {}).get("score") is not None}
@@ -2119,6 +2336,32 @@ def finalize(unit: Unit, phase="main"):
     write_text(T / ".easel" / "report.txt", unit.report + "\n")
     unit.summary = "\n".join(summary_lines)
     unit.done = True
+
+
+def file_records(unit, P):
+    """The manifest's file list: where each file is, Canvas's revision of it, and the hash easel last wrote or saw."""
+    files = unit.bundle.get("files") or {}
+    out = []
+    for fid, p in P.fplan.items():
+        meta, rec = files.get(fid) or {}, p.get("rec") or {}
+        if p.get("path") and (p["action"] == "reuse" or fid in unit.received):
+            path = Path(p["path"])
+            sha_ = p.get("sha") or rec.get("sha")
+            if not sha_ and path.exists():
+                try:
+                    sha_ = file_sha(path)
+                except OSError:
+                    sha_ = None
+            out.append({"id": fid, "name": meta.get("display_name"), "path": path.relative_to(unit.target).as_posix(),
+                        "size": meta.get("size"), "updated_at": meta.get("updated_at"), "sha": sha_})
+        elif p.get("fallback") and Path(p["fallback"]).exists() and rec:
+            out.append(dict(rec, id=fid))        # the new version did not arrive: keep the old record so the next run tries again
+    # Files this run did not meet, for example because a read failed, keep their record while they exist on disk.
+    seen = {x["id"] for x in out}
+    for rec in unit.old.get("files", []):
+        if str(rec.get("id")) not in seen and str(rec.get("id")) not in P.fplan and rec.get("path") and (unit.target / rec["path"]).exists():
+            out.append(dict(rec, id=str(rec["id"])))
+    return out
 
 
 def write_generated(unit, P, plan, what):
@@ -2211,8 +2454,10 @@ def build_ledger(unit, P):
         if it.get("locked") or it.get("status") not in (None, 200):
             exp = it.get("lock_explanation")
             if it.get("status") not in (None, 200):
-                return "refused", f"HTTP {it['status']}"
+                return "refused", status_text(it["status"])
             return "refused", "locked: " + re.sub(r"<[^>]+>", "", str(exp or "")).strip()[:80] if exp else "locked on Canvas"
+        if it.get("kept_from"):
+            return "copied", f"kept from {it['kept_from']}; did not load today"
         return "copied", ""
 
     def embedded(url, found_in):
@@ -2228,7 +2473,7 @@ def build_ledger(unit, P):
                 tp = P.tplan.get(rid) or {}
                 if tp.get("missing"):
                     if tp.get("status") not in (None, 200):
-                        row("media", tp.get("title") or r.get("title"), found_in, "refused", f"HTTP {tp['status']} on the subtitle track")
+                        row("media", tp.get("title") or r.get("title"), found_in, "refused", f"{status_text(tp['status'])} on the subtitle track")
                     else:
                         row("media", tp.get("title") or r.get("title"), found_in, "unsupported", "no transcript on Canvas")
                 elif tp:
@@ -2316,7 +2561,7 @@ def build_ledger(unit, P):
             for c in b.get("inbox") or []:
                 row("conversation", c.get("subject"), title, "copied", f"{len(c.get('messages') or [])} messages")
             for c in b.get("inbox_skipped") or []:
-                row("conversation", c.get("subject"), title, "skipped", c.get("reason") or "")
+                row("conversation", c.get("subject"), title, "refused" if c.get("status") else "skipped", c.get("reason") or "")
         elif n["key"] == "course_info":
             embedded(f"{ORIGIN}/courses/{cid}/assignments/syllabus", title)
             for e in b.get("events") or []:
@@ -2366,16 +2611,19 @@ def build_ledger(unit, P):
         found = tp.get("note") or "?"
         if tp.get("missing"):
             row("media", tp["title"], found, "refused" if tp.get("status") not in (None, 200) else "unsupported",
-                f"HTTP {tp['status']} on the subtitle track" if tp.get("status") not in (None, 200) else "no transcript on Canvas")
+                f"{status_text(tp['status'])} on the subtitle track" if tp.get("status") not in (None, 200) else "no transcript on Canvas")
         else:
             row("media", tp["title"], found, "transcript", f"{tp['words']:,} words")
     # whole lists Canvas refused
     names = {"pages": "page list", "files": "file list", "discussions": "discussion list", "inbox": "Inbox", "staff": "teaching staff",
              "grading_scheme": "grade scale", "assignment_groups": "assignment groups", "announcements": "announcement list",
-             "submissions": "your submissions", "modules": "module list", "assignments": "assignment list", "course": "course", "events": "calendar"}
-    for k, v in (b.get("api_status") or {}).items():
+             "submissions": "your submissions", "modules": "module list", "assignments": "assignment list", "course": "course", "events": "calendar",
+             "groups": "your groups"}
+    for k, v in (unit.raw_status or b.get("api_status") or {}).items():
         if v not in (200, None):
-            row(k.rstrip("s") if k != "grading_scheme" else "grade scale", names.get(k, k), "whole unit", "refused", f"HTTP {v}")
+            kept = (b.get("kept_from") or {}).get(k)
+            row(k.rstrip("s") if k != "grading_scheme" else "grade scale", names.get(k, k), "whole unit", "copied" if kept else "refused",
+                status_text(v) + (f", kept from {kept}" if kept else ""))
     totals = {"outcome": {}, "kind": {}, "service": {}}
     for r in rows:
         totals["outcome"][r["outcome"]] = totals["outcome"].get(r["outcome"], 0) + 1
@@ -2443,7 +2691,8 @@ def write_coverage(unit, P, ledger, line):
 
 
 def user_paths(T: Path, P: Planner):
-    return [x for x in T.iterdir() if x.name not in MANAGED_TOP and x.name != ".DS_Store"] + list(P.user_notes)
+    return [x for x in T.iterdir() if x.name not in MANAGED_TOP and x.name != ".DS_Store"
+            and not (x.name in INDEX_NAMES and index_is_ours(x))] + list(P.user_notes)
 
 
 def short_title(name, unit=""):
@@ -2487,6 +2736,8 @@ def summary_for(unit, changes):
         bits.append("updated: " + ", ".join(names) + (" and more" if len(unit.result["written"]) > 3 else ""))
     if not bits:
         bits.append("no changes on Canvas")
+    if unit.incomplete:
+        bits.insert(0, "INCOMPLETE, Canvas did not answer everything: " + "; ".join(unit.incomplete))
     cur = P.grades.total()
     if cur is not None:
         band = band_of(P.scheme, cur)
@@ -2503,7 +2754,8 @@ def full_report(unit, changes):
     after = snapshot(user_paths(T, P))
     before = unit.before
     changed_user = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
-    unit.checks = {"links_ok": ok, "links_bad": bad, "leftovers": len(leftovers), "user_changed": len(changed_user), "orphans": len(orphans)}
+    unit.checks = {"links_ok": ok, "links_bad": bad, "leftovers": len(leftovers), "user_changed": len(changed_user), "orphans": len(orphans),
+                   "personal_changed": len(unit.result.get("personal_changed") or [])}
     acts = {}
     for p in P.fplan.values():
         acts[p["action"]] = acts.get(p["action"], 0) + 1
@@ -2533,11 +2785,15 @@ def full_report(unit, changes):
     if res.get("backup"):
         L.append(f"v3 notes backed up to {Path(res['backup']).relative_to(T).as_posix()}")
     for fid, p in P.fplan.items():
-        if p.get("changed") and fid in unit.received:
-            L.append(f"  file changed on Canvas, saved beside the old copy: {Path(p['path']).relative_to(T).as_posix()}")
-    kept = [Path(p["path"]).relative_to(T).as_posix() for p in P.fplan.values() if p.get("local_differs")]
-    if kept:
-        L.append("  your copy differs from Canvas and is newer, kept yours: " + "; ".join(kept))
+        if not p.get("path"):
+            continue
+        rel = Path(p["path"]).relative_to(T).as_posix()
+        if p.get("replace") and fid in unit.received:
+            L.append(f"  file changed on Canvas, replaced: {rel}")
+        elif p.get("beside") and fid in unit.received:
+            L.append(f"  file changed on Canvas; your edited copy is kept and the new version is beside it: {rel}")
+        elif p.get("fallback") and fid not in unit.received:
+            L.append(f"  file changed on Canvas but the new version did not download; the old copy stays linked: {Path(p['fallback']).relative_to(T).as_posix()}")
     if unit.failed:
         L.append("  failed downloads (left as Canvas links): " + ", ".join(f"{(b.get('files') or {}).get(k, {}).get('display_name', k)} [{v}]" for k, v in unit.failed.items()))
     if changes:
@@ -2548,6 +2804,10 @@ def full_report(unit, changes):
             L.append("new items: " + "; ".join(f"{m[:30]}: {t}" for m, t in changes["added"][:20]))
         if changes.get("edited"):
             L.append("edited on Canvas: " + "; ".join(f"{m[:30]}: {t}" for m, t in changes["edited"][:20]))
+    if unit.incomplete:
+        L.append("INCOMPLETE: " + "; ".join(unit.incomplete))
+    if res.get("frozen"):
+        L.append("notes left as they were because Canvas did not answer: " + ", ".join(res["frozen"]))
     L.append("coverage: " + getattr(unit, "coverage_line", "").split(": ", 1)[-1] + " | every item in .easel/coverage.md")
     L.append("status: " + week_status(P).replace("**", ""))
     rub = [a for a in b.get("assignments") or [] if a.get("rubric")]
@@ -2558,9 +2818,13 @@ def full_report(unit, changes):
     if unit.viewer_keys:
         L.append(f"annotated feedback: {len(unit.viewer_keys)} files checked in the document viewer, {len(fbs)} saved"
                  + (f", problems: {'; '.join(unit.result.get('feedback_problems', [])[:5])}" if unit.result.get("feedback_problems") else ""))
-    bad_api = {k: v for k, v in (b.get("api_status") or {}).items() if v not in (200, None)}
-    if bad_api:
-        L.append("  Canvas refused (HTTP status; this part is missing): " + ", ".join(f"{k} {v}" for k, v in bad_api.items()))
+    bad_api = {k: v for k, v in (unit.raw_status or b.get("api_status") or {}).items() if v not in (200, None)}
+    refused = {k: v for k, v in bad_api.items() if not temporary(v)}
+    failed = {k: v for k, v in bad_api.items() if temporary(v)}
+    if refused:
+        L.append("  Canvas refused or does not have: " + ", ".join(f"{k} {status_text(v)}" for k, v in refused.items()))
+    if failed:
+        L.append("  Canvas did not answer (see INCOMPLETE above for what was kept): " + ", ".join(f"{k} {status_text(v)}" for k, v in failed.items()))
     cov = b.get("coverage") or {}
     if cov.get("words"):
         L.append(f"text coverage: {100 * (1 - cov['missing'] / cov['words']):.3f}% of {cov['words']:,} words the browser shows are in the notes"
@@ -2577,10 +2841,13 @@ def full_report(unit, changes):
     if res.get("reset"):
         L.append(f"edited notes replaced with the Canvas version (your copies are in .easel/backups/edited-{TODAY}): " + ", ".join(res["reset"]))
     if res.get("removed"):
-        L.append("old easel notes removed (in the backup): " + ", ".join(res["removed"]))
-    stale = [e["path"].name for e in P.stale if e["path"].exists()]
-    if stale:
-        L.append("old easel notes left in place (module gone from Canvas, or edited): " + ", ".join(stale))
+        L.append(f"old easel notes removed, backed up in {Path(res['removed_backup']).relative_to(T).as_posix()}: " + ", ".join(res["removed"]))
+    if res.get("kept_removed"):
+        L.append("notes left in place because they hold your text, properties or edits (their module is gone from Canvas): " + ", ".join(res["kept_removed"]))
+    if res.get("own_index"):
+        L.append("INDEX.md is your own file; easel's index is easel INDEX.md")
+    if res.get("personal_changed"):
+        L += ["  PERSONAL TEXT CHANGED " + x for x in res["personal_changed"]]
     if P.user_notes:
         L.append("your own notes inside easel folders (left alone): " + ", ".join(p.name for p in P.user_notes))
     L.append(f"time: fetch {b.get('fetch_ms', 0) / 1000:.1f}s, files {unit.timing.get('files_s', 0)}s, build {unit.timing.get('build_s', 0)}s")
@@ -2606,8 +2873,12 @@ def apply_feedback(units, data):
             continue
         cand = next((c for c in u.bundle.get("feedback_candidates") or [] if c["key"] == r["key"]), {})
         entry = dict(P.feedback.get(r["key"]) or {})
-        entry.update({"checked_at": NOW.isoformat(), "graded_at": cand.get("graded_at"), "posted_at": cand.get("posted_at"),
-                      "status": r.get("status"), "annotations": r.get("annotations") or []})
+        worked = r.get("status") in ("ok", "no annotations")
+        entry.update({"attempted_at": NOW.isoformat(), "status": r.get("status")})
+        if worked:
+            # A check that worked replaces the record. A failed one keeps the annotations and PDF from the last good check.
+            entry.update({"checked_at": NOW.isoformat(), "graded_at": cand.get("graded_at"), "posted_at": cand.get("posted_at"),
+                          "annotations": r.get("annotations") or []})
         if r.get("pdf"):
             import base64
             meta = (u.bundle.get("files") or {}).get(fid) or {}
@@ -2625,8 +2896,10 @@ def apply_feedback(units, data):
             entry["pdf"] = dest.relative_to(T).as_posix()
             entry["pdf_sha"] = hashlib.sha256(blob).hexdigest()[:16]
             u.result.setdefault("feedback_saved", []).append(short_title(a["name"]))
-        elif r.get("status") not in ("ok", "no annotations"):
+        elif not worked:
             u.result.setdefault("feedback_problems", []).append(f"{a['name']}: {r.get('status')}")
+            u.incomplete.append(f"annotated feedback for {short_title(a['name'])} ({r.get('status')}): "
+                                + ("the last good copy is kept" if entry.get("annotations") or entry.get("pdf") else "will be tried again"))
         P.feedback[r["key"]] = entry
         touched.add((u.code, a["id"]))
     for u in units.values():
@@ -2693,15 +2966,206 @@ def download_dirs():
 
 
 # ---------------------------------------------------------------- plan one unit when its data arrives
+def origin_mismatch(unit: Unit):
+    """The folder's Canvas site, when it is not the site this run reads. A course id means nothing across sites."""
+    old = unit.old.get("canvas")
+    if old and host_of(old) != host_of(ORIGIN):
+        return host_of(old)
+    return None
+
+
+def check_identity(unit: Unit, bundle):
+    site = origin_mismatch(unit)
+    if site:
+        raise RuntimeError(f"the unit folder belongs to Canvas at {site}, but this run reads {host_of(ORIGIN)}")
+    if bundle.get("origin") and host_of(bundle["origin"]) != host_of(ORIGIN):
+        raise RuntimeError(f"the Canvas data came from {host_of(bundle['origin'])}, but this run reads {host_of(ORIGIN)}")
+    if unit.old.get("course_id") and int(unit.old["course_id"]) != int(bundle["course"]["id"]):
+        raise RuntimeError(f"the unit folder belongs to Canvas course {unit.old['course_id']}, but Canvas returned course {bundle['course']['id']}")
+
+
+def bundle_path(code):
+    """The last Canvas data for a unit, kept per Canvas site."""
+    return STATE / "bundles" / host_of(ORIGIN) / f"{code.upper()}.json"
+
+
+def last_bundle(code):
+    """The last Canvas data for this unit on this site, or None."""
+    p = bundle_path(code)
+    if not p.exists():
+        old = STATE / "bundles" / f"{code.upper()}.json"      # before 4.5.0, one file per unit for every site
+        if not old.exists():
+            return None
+        p = old
+    try:
+        b = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if b.get("origin") and host_of(b["origin"]) != host_of(ORIGIN):
+        return None
+    return b
+
+
+# ---------------------------------------------------------------- failed reads
+def temporary(status):
+    """A read that may work next time: the network, the session, throttling, a server error, a cut-off list
+    or an unreadable reply. Canvas's own refusals (403, 404) are answers, and so is 200."""
+    if status in (None, 200):
+        return False
+    if isinstance(status, str):
+        return status in ("incomplete", "malformed")
+    return status in (0, 401, 408, 429) or 500 <= status < 600
+
+
+def status_text(status):
+    return {0: "the network failed", 401: "not signed in", "incomplete": "the list was cut off",
+            "malformed": "an unreadable reply"}.get(status, f"HTTP {status}")
+
+
+def item_key(it):
+    return it.get("page_url") or f"{it['type']}:{it.get('content_id')}"
+
+
+# Week and module notes carry assessment cards with the mark, so they wait too when marks are unknown.
+SECTION_NOTES = {"assignments": ("assessment", "grades", "index", "week", "module"), "submissions": ("assessment", "grades", "index", "week", "module"),
+                 "assignment_groups": ("grades", "index", "assessment"), "grading_scheme": ("grades",), "announcements": ("announcements",),
+                 "inbox": ("inbox",), "staff": ("course_info",), "course": ("course_info",), "events": ("course_info",),
+                 "groups": ("course_info",), "pages": ("other_pages",), "discussions": ("other_discussions",),
+                 "files": ("course_files",), "modules": ("week", "module")}
+SECTION_NAMES = {"modules": "the module list", "assignments": "the assessment list", "submissions": "your submissions and marks",
+                 "assignment_groups": "the assessment groups", "grading_scheme": "the grade scale", "announcements": "the announcements",
+                 "inbox": "the Inbox", "staff": "the teaching staff", "course": "the course details", "events": "the calendar",
+                 "groups": "your groups", "pages": "the page list", "discussions": "the discussion list", "files": "the file list"}
+
+
+def keep_previous(unit, bundle):
+    """Q12: a read that failed today keeps what the last good read gave. Sets unit.incomplete (lines for the
+    summary) and unit.frozen (note kinds and keys to leave as they are, because no earlier data exists)."""
+    old = last_bundle(unit.code)
+    when = (fmt_date((old or {}).get("scraped_at")) or "the last run") if old else None
+    status = bundle.get("api_status") or {}
+    old_status = (old or {}).get("api_status") or {}
+    lines, frozen = [], set()
+    failed = [k for k, v in status.items() if temporary(v)]
+
+    def good(sec):
+        return old is not None and old_status.get(sec) in (None, 200)
+
+    def take_files(roles):
+        for fid, meta in (old.get("files") or {}).items():
+            if meta.get("role") in roles:
+                bundle.setdefault("files", {}).setdefault(fid, meta)
+
+    kept_sections = []
+    for sec in failed:
+        name = SECTION_NAMES.get(sec, sec)
+        if good(sec):
+            if sec == "modules":
+                bundle["modules"] = old.get("modules") or []
+                for k in ("refs", "media", "tools"):
+                    bundle[k] = {**(old.get(k) or {}), **(bundle.get(k) or {})}
+            elif sec == "assignments":
+                bundle["assignments"] = old.get("assignments") or []
+                bundle["feedback_candidates"] = old.get("feedback_candidates") or []
+                take_files(("submission", "feedback"))
+            elif sec == "submissions":
+                by_id = {a["id"]: a for a in old.get("assignments") or []}
+                for a in bundle.get("assignments") or []:
+                    if a["id"] in by_id:
+                        a["submission"] = by_id[a["id"]].get("submission")
+                bundle["feedback_candidates"] = old.get("feedback_candidates") or []
+                take_files(("submission", "feedback"))
+            elif sec == "grading_scheme":
+                bundle.setdefault("course", {})["grading_scheme"] = (old.get("course") or {}).get("grading_scheme")
+            elif sec == "course":
+                keep = dict(old.get("course") or {})
+                keep.update({k: v for k, v in (bundle.get("course") or {}).items() if k in ("id", "name", "course_code")})
+                bundle["course"] = keep
+                bundle["syllabus_md"] = old.get("syllabus_md") or ""
+                bundle["group_weights"] = old.get("group_weights", bundle.get("group_weights"))
+            elif sec == "inbox":
+                bundle["inbox"], bundle["inbox_skipped"] = old.get("inbox") or [], old.get("inbox_skipped") or []
+                take_files(("inbox",))
+            elif sec == "pages":
+                bundle["extra_pages"] = old.get("extra_pages") or []
+            elif sec == "discussions":
+                bundle["extra_discussions"] = old.get("extra_discussions") or []
+            elif sec == "files":
+                bundle["extra_files"] = old.get("extra_files") or []
+            else:
+                bundle[sec] = old.get(sec)
+            kept_sections.append(f"{name} ({status_text(status[sec])}): kept from {when}")
+            status[sec] = 200
+            bundle.setdefault("kept_from", {})[sec] = when
+        else:
+            frozen.update(SECTION_NOTES.get(sec, ()))
+            lines.append(f"{name} ({status_text(status[sec])}): nothing earlier to keep, so the notes it feeds were left as they were")
+    lines = kept_sections + lines
+    # single items inside modules: pages, quizzes, discussions, assignments, replies, attempts
+    old_items = {}
+    for m in (old or {}).get("modules") or []:
+        for it in m.get("items") or []:
+            old_items[item_key(it)] = it
+    old_mods = {m["id"]: m for m in (old or {}).get("modules") or []}
+    n_kept = n_frozen = 0
+    for m in bundle.get("modules") or []:
+        if temporary(m.get("items_status")):
+            om = old_mods.get(m["id"])
+            if om and not temporary(om.get("items_status")):
+                m["items"], m["items_status"] = om.get("items") or [], 200
+                m["kept_from"] = when
+                n_kept += 1
+            else:
+                m["frozen"] = True
+                n_frozen += 1
+            continue
+        for i, it in enumerate(m.get("items") or []):
+            if temporary(it.get("status")):
+                o = old_items.get(item_key(it))
+                if o and not temporary(o.get("status")):
+                    m["items"][i] = dict(o, id=it.get("id"), html_url=it.get("html_url") or o.get("html_url"), kept_from=when)
+                    n_kept += 1
+                else:
+                    m["frozen"] = True
+                    n_frozen += 1
+                continue
+            o = old_items.get(item_key(it)) or {}
+            for part in ("replies", "attempts"):
+                if temporary((it.get(part) or {}).get("status")) and o.get(part) and not temporary(o[part].get("status")):
+                    it[part] = dict(o[part], kept_from=when)
+                    n_kept += 1
+    for key, m in list((bundle.get("media") or {}).items()):
+        o = ((old or {}).get("media") or {}).get(key)
+        if temporary(m.get("status")) and o and not temporary(o.get("status")):
+            bundle["media"][key] = dict(o, kept_from=when)
+            n_kept += 1
+    for fid, meta in list((bundle.get("files") or {}).items()):
+        o = ((old or {}).get("files") or {}).get(fid)
+        if temporary(meta.get("status")) and o and not temporary(o.get("status")):
+            bundle["files"][fid] = dict(o)
+            n_kept += 1
+    for u, t in list((bundle.get("tools") or {}).items()):
+        o = ((old or {}).get("tools") or {}).get(u)
+        if temporary(t.get("status")) and o and o.get("host"):
+            bundle["tools"][u] = dict(o)
+    if n_kept:
+        lines.append(f"{n_kept} item{'s' if n_kept != 1 else ''} did not load today: kept from {when}")
+    if n_frozen:
+        lines.append(f"{n_frozen} module{'s' if n_frozen != 1 else ''} did not load today and nothing earlier exists: their notes were left as they were")
+    unit.incomplete, unit.frozen = lines, frozen
+    return bundle
+
+
 def plan_unit(unit: Unit, bundle):
+    unit.raw_status = dict(bundle.get("api_status") or {})
+    bundle = keep_previous(unit, bundle)
     unit.bundle = bundle
     if unit.target is None:
         cname = clean_name(re.sub(r'^[A-Z]{2,5}\d{3,5}\S*\s*', '', bundle['course']['name']))
         unit.target = unit.root / f"{unit.code} {cname}"
         unit.target.mkdir(parents=True, exist_ok=True)
         unit.mode = "full"
-    if unit.old.get("course_id") and int(unit.old["course_id"]) != int(bundle["course"]["id"]):
-        raise RuntimeError(f"the unit folder belongs to Canvas course {unit.old['course_id']}, but Canvas returned course {bundle['course']['id']}")
+    check_identity(unit, bundle)
     P = Planner(unit, bundle).build().assign_paths()
     P.plan_files()
     P.plan_transcripts()
@@ -2815,8 +3279,7 @@ class Server:
                         return self.reply(200)
                     if url.path == "/bundle":
                         bundle = json.loads(self.body().decode("utf-8"))
-                        (STATE / "bundles").mkdir(parents=True, exist_ok=True)
-                        write_text(STATE / "bundles" / f"{u.code}.json", json.dumps(bundle, ensure_ascii=False))
+                        write_text(bundle_path(u.code), json.dumps(bundle, ensure_ascii=False))
                         try:
                             need, keys = plan_unit(u, bundle)
                         except Exception as e:
@@ -2886,6 +3349,10 @@ def summary_text(srv, elapsed):
                 needs.append(f"{u.code}: {u.checks['links_bad']} broken link(s), see .easel/report.txt")
             if getattr(u, "checks", {}).get("user_changed"):
                 needs.append(f"{u.code}: {u.checks['user_changed']} of your own files changed during the run, see .easel/report.txt")
+            if u.incomplete:
+                needs.append(f"{u.code}: the update is incomplete, run easel again later")
+            if getattr(u, "checks", {}).get("personal_changed"):
+                needs.append(f"{u.code}: your text under My notes changed in {u.checks['personal_changed']} note(s), see .easel/report.txt and .easel/backups")
             if u.plan and not u.plan.scheme and u.plan.grades.total() is not None:
                 needs.append(f"SCALE_NEEDED {host_of(ORIGIN)}")
         else:
@@ -2909,7 +3376,7 @@ def serve(args):
     root = Path(args.root or ".").resolve()
     units = []
     for code in args.units:
-        tgt = Path(args.target).resolve() if args.target else find_target(root, code)
+        tgt = Path(args.target).resolve() if args.target else find_target(root, code, host_of(args.canvas or ""))
         u = Unit(code, tgt, root)
         u.media, u.tidy = args.media, args.tidy
         u.feedback_enabled, u.refresh_feedback = not args.no_feedback, args.refresh_feedback
@@ -2994,19 +3461,61 @@ def loader_js(port, run_id):
             "return 'PERMISSION_'+s.toUpperCase()})()") % (port, run_id, ORIGIN)
 
 
-def check_update():
-    """Returns a one-line message. Installs a newer published release when one exists."""
-    if os.environ.get("EASEL_NO_UPDATE"):
-        return None
+SKILL_HOMES = (Path.home() / ".claude" / "skills" / "easel", Path.home() / ".agents" / "skills" / "easel")
+INSTALLED = ".installed.json"    # written by an update: the version and the hash of each file it put in place
+
+
+def short_path(p: Path):
     try:
-        with urllib.request.urlopen(RELEASE + "VERSION", timeout=4) as r:
-            remote = r.read().decode("utf-8").strip()
-    except Exception:
-        return "Couldn't check for updates, carrying on with what you have."
-    local = (KIT / "VERSION").read_text(encoding="utf-8").strip() if (KIT / "VERSION").exists() else VERSION
-    if version_tuple(remote) <= version_tuple(local):
+        return "~/" + p.resolve().relative_to(Path.home().resolve()).as_posix()
+    except ValueError:
+        return str(p)
+
+
+def kit_version(kit: Path):
+    """The first word of a skill folder's VERSION file, or None."""
+    try:
+        return (kit / "VERSION").read_text(encoding="utf-8").split()[0]
+    except (OSError, IndexError):
         return None
-    # Download into the skill folder itself: os.replace cannot move files from another disk, such as a Linux /tmp.
+
+
+def helper_version(kit: Path):
+    """The version the helper in a skill folder says it is, or None."""
+    try:
+        m = re.search(r'^VERSION = "([^"]+)"', (kit / "scripts" / "easel.py").read_text(encoding="utf-8"), re.M)
+    except OSError:
+        return None
+    return m.group(1) if m else None
+
+
+def kit_problems(kit: Path):
+    """Why a skill folder is not a whole copy of one version. An empty list means it is."""
+    missing = [rel for rel in KIT_FILES.values() if not (kit / rel).is_file()]
+    if missing:
+        return ["missing " + ", ".join(missing)]
+    problems = []
+    try:
+        compile((kit / "scripts" / "easel.py").read_text(encoding="utf-8"), "easel.py", "exec")
+    except (SyntaxError, ValueError, OSError):
+        problems.append("scripts/easel.py does not run")
+    v, hv = kit_version(kit), helper_version(kit)
+    if v and hv and version_tuple(v) != version_tuple(hv):
+        problems.append(f"VERSION says {v} but scripts/easel.py says {hv}")
+    try:
+        rec = json.loads((kit / INSTALLED).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        rec = {}
+    # The record describes the last update. A newer VERSION means an installer replaced the files since; then it says nothing.
+    if isinstance(rec, dict) and rec.get("sha") and v and version_tuple(rec.get("version")) == version_tuple(v):
+        for rel, want in rec["sha"].items():
+            if rel in KIT_FILES.values() and file_sha(kit / rel) != want:
+                problems.append(f"{rel} is not the {rec['version']} file")
+    return problems
+
+
+def download_release(remote):
+    """Download every release file into a new folder under the skill folder and check it. Returns the folder."""
     tmp = Path(tempfile.mkdtemp(prefix=".update-", dir=KIT))
     try:
         for name, rel in KIT_FILES.items():
@@ -3014,21 +3523,130 @@ def check_update():
             dst.parent.mkdir(parents=True, exist_ok=True)
             with urllib.request.urlopen(RELEASE + name, timeout=20) as r:
                 dst.write_bytes(r.read())
+        empty = [rel for rel in KIT_FILES.values() if (tmp / rel).stat().st_size == 0]
+        if empty:
+            raise ValueError("empty download: " + ", ".join(empty))
+        if (kit_version(tmp) or "") != remote.split()[0]:
+            raise ValueError(f"the downloaded VERSION says {kit_version(tmp)}, not {remote.split()[0]}")
+        if not (tmp / "SKILL.md").read_text(encoding="utf-8").startswith("---"):
+            raise ValueError("the downloaded SKILL.md has no front matter")
         compile((tmp / "scripts" / "easel.py").read_text(encoding="utf-8"), "easel.py", "exec")
-        for rel in KIT_FILES.values():
-            (KIT / rel).parent.mkdir(parents=True, exist_ok=True)
-            os.replace(tmp / rel, KIT / rel)
-    except Exception as e:
-        return f"An update to {remote.split()[0]} exists but failed to install ({e.__class__.__name__}). Carrying on with {local.split()[0]}."
-    finally:
+        if version_tuple(helper_version(tmp)) != version_tuple(remote):
+            raise ValueError(f"the downloaded helper says {helper_version(tmp)}, not {remote.split()[0]}")
+    except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
-    return f"UPDATED {local.split()[0]} -> {remote.split()[0]}"
+        raise
+    return tmp
+
+
+def install_files(kit: Path, src: Path, remote):
+    """Put the files in src into one skill folder. VERSION goes last. On any failure, put the old files back.
+
+    Raises the failure. The exception carries `restored`: True when the old files are back in place."""
+    kit.mkdir(parents=True, exist_ok=True)
+    order = [rel for rel in KIT_FILES.values() if rel != "VERSION"] + ["VERSION"]
+    want = {rel: file_sha(src / rel) for rel in order}
+    # Both folders sit inside the skill folder, so os.replace never crosses a disk.
+    stage = Path(tempfile.mkdtemp(prefix=".update-", dir=kit))
+    back = Path(tempfile.mkdtemp(prefix=".rollback-", dir=kit))
+    replaced = []
+    try:
+        for rel in order:
+            (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src / rel, stage / rel)
+            if (kit / rel).is_file():
+                (back / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(kit / rel, back / rel)
+        write_text(kit / INSTALLED, json.dumps({"version": remote.split()[0], "state": "replacing", "sha": want}, indent=1))
+        for rel in order:
+            (kit / rel).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(stage / rel, kit / rel)
+            replaced.append(rel)
+        wrong = [rel for rel in order if not (kit / rel).is_file() or file_sha(kit / rel) != want[rel]]
+        if wrong:
+            raise OSError("written wrongly: " + ", ".join(wrong))
+        write_text(kit / INSTALLED, json.dumps({"version": remote.split()[0], "state": "ok", "sha": want}, indent=1))
+    except Exception as e:
+        restored = True
+        for rel in replaced:
+            try:
+                if (back / rel).is_file():
+                    os.replace(back / rel, kit / rel)
+            except OSError:
+                restored = False
+        if restored:
+            try:
+                (kit / INSTALLED).unlink()
+            except OSError:
+                pass
+        e.restored = restored
+        raise
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+        shutil.rmtree(back, ignore_errors=True)
+
+
+def skill_copies():
+    """This skill folder, plus the other copy the installer writes, when this folder is one of the two."""
+    copies = [KIT]
+    homes = [h.resolve() for h in SKILL_HOMES]
+    if KIT.resolve() in homes:
+        copies += [h for h in SKILL_HOMES if h.resolve() != KIT.resolve() and (h / "SKILL.md").is_file()]
+    return copies
+
+
+def check_update():
+    """Returns a one-line message, or None when nothing changed.
+
+    Installs a newer published release when one exists, and repairs a copy whose files are not all one version.
+    The message starts with "easel updated" or "easel repaired" when this folder's files changed."""
+    if os.environ.get("EASEL_NO_UPDATE"):
+        return None
+    try:
+        with urllib.request.urlopen(RELEASE + "VERSION", timeout=4) as r:
+            remote = r.read().decode("utf-8").strip()
+    except Exception:
+        return "Couldn't check for updates, carrying on with what you have."
+    local = kit_version(KIT) or VERSION
+    todo = {}
+    for kit in skill_copies():
+        v = kit_version(kit) or "0"
+        if version_tuple(remote) > version_tuple(v):
+            todo[kit] = "update"
+        elif version_tuple(remote) == version_tuple(v) and kit_problems(kit):
+            todo[kit] = "repair"
+    if not todo:
+        return None
+    R, L = remote.split()[0], local.split()[0]
+    try:
+        src = download_release(remote)
+    except Exception as e:
+        return f"easel {R} could not be downloaded ({e.__class__.__name__}: {e}). Carrying on with {L}."
+    done, failed = [], []
+    try:
+        for kit in todo:
+            try:
+                install_files(kit, src, remote)
+                done.append(kit)
+            except Exception as e:
+                failed.append((kit, e))
+    finally:
+        shutil.rmtree(src, ignore_errors=True)
+    names = lambda kits: " and ".join(short_path(k) for k in kits)
+    if failed:
+        kit, e = failed[0]
+        back = f"The {L} files were put back." if getattr(e, "restored", False) else "Some files were not put back; easel repairs them on its next run."
+        return f"An update to {R} exists but failed to install in {short_path(kit)} ({e.__class__.__name__}: {e}). {back} Carrying on with {L}."
+    if all(todo[k] == "repair" for k in done):
+        return f"easel repaired its {R} files in {names(done)}."
+    return f"easel updated from {L} to {R} in {names(done)}."
 
 
 def cmd_start(args):
     msg = None if args.no_update else check_update()
-    if msg and msg.startswith("UPDATED"):
-        print(f"easel updated from {msg.split()[1]} to {msg.split()[3]}.")
+    if msg and msg.startswith(("easel updated", "easel repaired")):
+        # This helper's own files changed. Start again from the new files.
+        print(msg)
         env = dict(os.environ, EASEL_NO_UPDATE="1")
         sys.exit(subprocess.call([sys.executable, str(HERE / "easel.py")] + sys.argv[1:], env=env))
     STATE.mkdir(parents=True, exist_ok=True)
@@ -3046,11 +3664,18 @@ def cmd_start(args):
     if not root.is_dir():
         print(f"ROOT_NEEDED: the notes folder does not exist: {root}. Ask the user for the right folder.")
         sys.exit(2)
-    units = [Unit(c, Path(args.target).resolve() if args.target else find_target(root, c), root) for c in args.units]
+    host = host_of(args.canvas or cfg.get("canvas") or "")
+    units = [Unit(c, Path(args.target).resolve() if args.target else find_target(root, c, host), root) for c in args.units]
     if not (args.canvas or cfg.get("canvas") or any(u.old.get("canvas") for u in units)):
         print("CANVAS_NEEDED: ask the user for their Canvas address, such as https://canvas.qut.edu.au, then run start again with --canvas.")
         sys.exit(2)
     set_origin(args.canvas or cfg.get("canvas"), units)
+    for u in units:
+        site = origin_mismatch(u)
+        if site:
+            print(f"WRONG_SITE: the folder {u.target} holds {u.code} from {site}, but this run reads {host_of(ORIGIN)}. "
+                  f"Nothing was read or written. Give the right --canvas address, or another --root for this site's notes.")
+            sys.exit(2)
     cfg.update({"canvas": ORIGIN, "root": str(root)})
     save_config(cfg)
     port = free_port(args.port)
@@ -3185,15 +3810,14 @@ def cmd_refresh(args):
     root = Path(args.root).expanduser().resolve() if args.root else Path(cfg.get("root") or ".").resolve()
     lines = []
     for code in args.units:
-        src = STATE / "bundles" / f"{code.upper()}.json"
-        tgt = find_target(root, code)
-        if not src.exists() or not tgt:
-            lines.append(f"{code.upper()}: no earlier run found under {root}; run start instead")
+        tgt = find_target(root, code, host_of(cfg.get("canvas") or ""))
+        u = Unit(code, tgt, root) if tgt else None
+        set_origin(cfg.get("canvas") or (u.old.get("canvas") if u else None), [u] if u else [])
+        bundle = last_bundle(code)
+        if not bundle or not tgt:
+            lines.append(f"{code.upper()}: no earlier run found under {root} for {host_of(ORIGIN)}; run start instead")
             continue
-        bundle = json.loads(src.read_text(encoding="utf-8"))
-        u = Unit(code, tgt, root)
         u.reset_edited = args.reset_edited
-        set_origin(cfg.get("canvas") or u.old.get("canvas") or bundle.get("origin"), [u])
         need, _ = plan_unit(u, bundle)
         for fid in need:
             u.failed[fid] = "not downloaded yet"
@@ -3260,7 +3884,7 @@ def main():
     elif a.cmd == "update":
         os.environ.pop("EASEL_NO_UPDATE", None)
         msg = check_update()
-        print(f"easel updated from {msg.split()[1]} to {msg.split()[3]}." if msg and msg.startswith("UPDATED") else (msg or f"easel {VERSION} is up to date."))
+        print(msg or f"easel {VERSION} is up to date.")
     else:
         print(VERSION)
 

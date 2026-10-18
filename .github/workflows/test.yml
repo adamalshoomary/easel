@@ -25,6 +25,9 @@ jobs:
         run: |
           node -e "new Function(require('fs').readFileSync('easel/skills/easel/scripts/scrape.js','utf8').replace('__CFG__','{}'))"
           node -e "new Function('return ' + require('fs').readFileSync('easel/skills/easel/scripts/viewer.js','utf8').replace(/^\/\/.*$/gm, ''))"
+      - name: Install jsdom for the browser-script tests
+        run: npm install --no-audit --no-fund
+        working-directory: easel/tests/browser
       - name: Run the tests
         run: python -m unittest discover -s easel/tests -v
       # The installers download the release files, as they do for a student. A local server answers

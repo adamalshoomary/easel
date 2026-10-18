@@ -75,15 +75,17 @@ Each unit gets one folder, ready for Obsidian or any Markdown app:
 ```
 IFB220 Introduction to AI/
 ├── INDEX.md            next due date, every assessment, every week
-├── 1 Course Info/      staff, groups, syllabus, announcements, Inbox
+├── 1 Course Info/      staff, groups, announcements, Inbox
 ├── 2 Assessments/      brief, rubric, your files, mark, feedback; Grades.md
 ├── 3 Weeks/            one note per week
-└── Files/              attachments, submissions, marked-up feedback PDFs, video transcripts, slide text
+└── Files/              attachments, submissions, feedback PDFs, transcripts, slide text
 ```
+
+Each assessment note holds the brief, the rubric with the level you reached on each criterion, your submitted files, the mark, the marker's comments and the marked-up PDF. The [install page](https://adamalshoomary.github.io/easel/) shows one.
 
 Lecture slides and Word handouts get a text file beside them, so you can search them. Each unit folder also keeps a list of everything Canvas showed easel and what it did with each item, in `.easel/coverage.md`.
 
-Grades.md shows your average on marked work and the mark you need for each grade. Each later run updates the notes and lists what changed. Write your own notes under **My notes**. easel keeps them, and it never changes a file it did not create.
+Grades.md shows your average on marked work and the mark you need for each grade, using the drop rules and extra credit your unit set in Canvas. Each later run updates the notes and lists what changed. Write your own notes under **My notes**. easel keeps them, and it never changes a file it did not create. A note you edit stays as you left it.
 
 ## Privacy and limits
 
@@ -96,7 +98,9 @@ Grades.md shows your average on marked work and the mark you need for each grade
 - To name a Canvas tool link, easel opens the link's Canvas page. It never opens the tool itself.
 - For a classic quiz, easel copies your attempts: each question, the options and whether you got it right. Canvas does not say which option you picked.
 - If Canvas hides your unit total, easel still works out your average on marked work. Your university calculates your real result from the rules in your unit outline.
-- easel updates itself from each new release. To update now, run `/easel update`.
+- If Canvas does not answer a read, the summary says INCOMPLETE and names the part. The notes keep the last good copy. Run easel again later.
+- Each unit folder belongs to one Canvas site. easel refuses to update it from another site.
+- easel updates itself from each new release. If an update is interrupted, the next run repairs it. To update now, run `/easel update`.
 - If you installed easel before 4.1.0, install it again. Those copies cannot update themselves.
 - On a v3 folder, the first run backs up the v3 notes to `.easel/backups`.
 

@@ -47,9 +47,10 @@ Run this command. Put each value in double quotes. Leave out any value that you 
 PY "<kit>/scripts/easel.py" start <UNIT CODES> --canvas "<CANVAS URL>" --root "<NOTES FOLDER>" <FLAGS>
 ```
 
-- If the output has a line that starts with `easel updated`, tell the user that line in one sentence.
+- If the output has a line that starts with `easel updated` or `easel repaired`, tell the user that line in one sentence.
 - If the output starts with `CANVAS_NEEDED`, ask the user for the Canvas address, then run the command again with `--canvas`.
 - If the output starts with `ROOT_NEEDED`, ask the user for the notes folder, then run the command again with `--root`.
+- If the output starts with `WRONG_SITE`, the unit folder belongs to another Canvas site. Tell the user the line, ask which Canvas address or notes folder they meant, then run the command again. Nothing was read or written.
 - If the command fails with any other error, quote the error to the user and stop.
 - The last line starts with `LOADER: `. Keep the text after `LOADER: ` exactly. This text is the loader.
 
@@ -96,6 +97,7 @@ The first word of the output tells you what to do:
    - "A to F": `A:90,B:80,C:70,D:60,F:0`
    Then run `PY "<kit>/scripts/easel.py" scale --canvas "<CANVAS URL>" --set "<the scale>"`. Then run `PY "<kit>/scripts/easel.py" refresh <UNIT CODES>`. Tell the user that the Grades notes now show the mark needed for each grade.
 5. If a line starts with `Needs you:`, tell the user each item in plain words.
+6. If a unit line contains `INCOMPLETE`, Canvas did not answer every read. The notes keep the last good copy of each part that failed, or stay as they were. Tell the user which part failed, in one sentence, and that running easel again later completes the update.
 
 ## Notes that the student edited
 

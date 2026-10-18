@@ -1,0 +1,8 @@
+{
+  "name": "easel-browser-tests",
+  "private": true,
+  "description": "Runs the easel browser scripts against fake Canvas replies. Test-only: the installed easel needs no Node.",
+  "type": "module",
+  "scripts": { "test": "node test_scripts.mjs" },
+  "devDependencies": { "jsdom": "^25.0.1" }
+}

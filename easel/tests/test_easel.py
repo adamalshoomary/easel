@@ -111,11 +111,14 @@ def make_bundle(weighted=True):
     }
 
 
-def run_unit(bundle, root, received=None, reset_edited=False, feedback=None, blobs=None):
-    """Plan and write one unit the way the server does, with fake downloads."""
+def run_unit(bundle, root, received=None, reset_edited=False, feedback=None, blobs=None, cache=False):
+    """Plan and write one unit the way the server does, with fake downloads. cache=True also keeps the
+    Canvas data the way the server does, so a later run can fall back on it."""
     easel.set_origin(ORIGIN)
     u = easel.Unit(bundle["unit"], easel.find_target(Path(root), bundle["unit"]), Path(root))
     u.reset_edited = reset_edited
+    if cache:
+        easel.write_text(easel.bundle_path(bundle["unit"]), json.dumps(bundle))
     need, keys = easel.plan_unit(u, copy.deepcopy(bundle))
     for fid in need:
         p = u.staging / fid
@@ -239,6 +242,72 @@ class Grades(unittest.TestCase):
         g = easel.Grades(b)
         # Drop lowest of 15/20 (0.75) and 5/5 (1.0): keeps 5/5. Exam group has no assessments and no weight in points mode.
         self.assertAlmostEqual(g.total(), 1.0)
+
+    @staticmethod
+    def grades(scores, weighted=False, rules=None, weight=100, groups=None):
+        """A unit from (score, points) pairs in one group, or several groups as {name: ([(score, points)...], weight, rules)}."""
+        b = make_bundle(weighted=weighted)
+        b["assignments"], b["assignment_groups"] = [], []
+        spec = groups or {"G": (scores, weight, rules or {})}
+        n = 0
+        for gi, (name, (pairs, w, r)) in enumerate(spec.items(), 1):
+            b["assignment_groups"].append({"id": gi, "name": name, "position": gi, "group_weight": w, "rules": r})
+            for score, points in pairs:
+                n += 1
+                sub = None if score is None else {"id": 7000 + n, "workflow_state": "graded", "score": score, "files": [], "comments": []}
+                if score == "excused":
+                    sub = {"id": 7000 + n, "excused": True, "files": [], "comments": []}
+                b["assignments"].append({"id": n, "name": f"Task {n}", "points_possible": points, "grading_type": "points", "published": True,
+                                         "submission_types": ["online_upload"], "html_url": f"{ORIGIN}/courses/9/assignments/{n}",
+                                         "assignment_group_id": gi, "rubric": [], "description_md": "", "submission": sub})
+        return easel.Grades(b)
+
+    def test_drop_lowest_matches_canvas(self):
+        # The review case: Canvas drops the assessment whose removal gives the best group total.
+        g = self.grades([(1, 10), (20, 100), (90, 100)], rules={"drop_lowest": 1})
+        self.assertAlmostEqual(g.total(), 91 / 110)
+        self.assertEqual(g.dropped(g.groups[0]), {2})
+        # Equal point values: the lowest score goes.
+        g = self.grades([(5, 10), (9, 10), (7, 10)], rules={"drop_lowest": 1})
+        self.assertAlmostEqual(g.total(), 16 / 20)
+        # Two drops with unequal values keep the best pair: 90/100 and 50/50.
+        g = self.grades([(1, 10), (20, 100), (90, 100), (50, 50)], rules={"drop_lowest": 2})
+        self.assertAlmostEqual(g.total(), 140 / 150)
+        # Lowest and highest together.
+        g = self.grades([(5, 10), (9, 10), (7, 10)], rules={"drop_lowest": 1, "drop_highest": 1})
+        self.assertAlmostEqual(g.total(), 7 / 10)
+        # A protected assessment is never dropped, so the next lowest goes.
+        g = self.grades([(5, 10), (9, 10), (7, 10)], rules={"drop_lowest": 1, "never_drop": [1]})
+        self.assertAlmostEqual(g.total(), 14 / 20)
+        self.assertEqual(g.dropped(g.groups[0]), {3})
+        # More drops than marks: Canvas keeps at least one.
+        g = self.grades([(5, 10), (9, 10)], rules={"drop_lowest": 3})
+        self.assertAlmostEqual(g.total(), 9 / 10)
+        # Unmarked work is not dropped today, and counts at the fill when forecasting.
+        g = self.grades([(5, 10), (9, 10), (None, 10)], rules={"drop_lowest": 1})
+        self.assertAlmostEqual(g.total(), 9 / 10)
+        self.assertAlmostEqual(g.total(fill=0.0), 14 / 20)      # the zero is dropped
+        self.assertAlmostEqual(g.total(fill=1.0), 19 / 20)      # the 5 is dropped
+        # Excused work is out of the calculation entirely.
+        g = self.grades([(5, 10), ("excused", 10), (9, 10)], rules={"drop_lowest": 1})
+        self.assertAlmostEqual(g.total(), 9 / 10)
+
+    def test_extra_credit(self):
+        # Unweighted: 90/100 plus 5/0 is 95%.
+        g = self.grades([(90, 100), (5, 0)])
+        self.assertAlmostEqual(g.total(), 0.95)
+        # Weighted: the extra credit lifts its group.
+        g = self.grades(None, weighted=True, groups={"A": ([(90, 100), (5, 0)], 60, {}), "B": ([(40, 50)], 40, {})})
+        self.assertAlmostEqual(g.total(), 0.6 * 0.95 + 0.4 * 0.8)
+        # A weighted group with only extra credit has no possible points and is left out.
+        g = self.grades(None, weighted=True, groups={"A": ([(5, 0)], 60, {}), "B": ([(40, 50)], 40, {})})
+        self.assertAlmostEqual(g.total(), 0.8)
+        # Weights that add to less than 100 are scaled up, as Canvas does.
+        g = self.grades(None, weighted=True, groups={"A": ([(90, 100)], 30, {}), "B": ([(40, 50)], 20, {})})
+        self.assertAlmostEqual(g.total(), (0.3 * 0.9 + 0.2 * 0.8) / 0.5)
+        # An unknown rule is reported, and the figures carry a warning.
+        g = self.grades([(5, 10)], rules={"drop_lowest": 0, "keep_highest": 2})
+        self.assertEqual(g.unsupported, ["G: rule keep_highest"])
 
     def test_band(self):
         s = easel.scheme_of(make_bundle())
@@ -596,6 +665,308 @@ class Notes(unittest.TestCase):
         self.assertTrue(any("marks released" in x for x in u.summary.split("\n")))
 
 
+class Protection(unittest.TestCase):
+    """Q11: personal text, the index, files and course identity survive updates."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="easel-q11-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def unit_dir(self):
+        return next(self.root.glob("ABC101*"))
+
+    def test_removed_module_keeps_personal_notes(self):
+        run_unit(make_bundle(), self.root)
+        T = self.unit_dir()
+        w1, w2 = T / "3 Weeks" / "Week 01 - Basics.md", T / "3 Weeks" / "Week 02 - More.md"
+        w1.write_text(w1.read_text(encoding="utf-8") + "\nMy own week 1 thoughts.\n", encoding="utf-8")
+        old = time.time() - 10 * 86400
+        os.utime(w2, (old, old))            # an old modification time proves nothing either way
+        b = make_bundle()
+        b["modules"] = [b["modules"][2]]    # both week modules leave Canvas
+        u = run_unit(b, self.root)
+        self.assertTrue(w1.exists())
+        self.assertIn("My own week 1 thoughts.", w1.read_text(encoding="utf-8"))
+        self.assertIn(w1.name, u.result["kept_removed"])
+        self.assertFalse(w2.exists())       # exactly what easel wrote: removed after a verified backup
+        self.assertIn(w2.name, u.result["removed"])
+        z = Path(u.result["removed_backup"])
+        self.assertTrue(z.exists())
+        import zipfile
+        with zipfile.ZipFile(z) as zf:
+            self.assertIn("3 Weeks/Week 02 - More.md", zf.namelist())
+            self.assertIn("A Canvas page called My notes.", zf.read("3 Weeks/Week 02 - More.md").decode("utf-8"))
+        self.assertIn("notes left in place", u.report)
+        self.assertIn("removed-notes", u.report)
+        # a note with a property of the student's own also stays
+        run_unit(make_bundle(), self.root)
+        w2.write_text(w2.read_text(encoding="utf-8").replace("updated:", "tags: [keep]\nupdated:", 1), encoding="utf-8")
+        u = run_unit(b, self.root)
+        self.assertTrue(w2.exists())
+        self.assertIn(w2.name, u.result["kept_removed"])
+        self.assertEqual(u.checks["personal_changed"], 0)
+
+    def test_index_ownership_and_personal_text(self):
+        T = self.root / "ABC101 Test Unit"
+        T.mkdir()
+        (T / "INDEX.md").write_text("# My own index\n\nMine.\n", encoding="utf-8")
+        u = run_unit(make_bundle(), self.root)
+        self.assertEqual((T / "INDEX.md").read_text(encoding="utf-8"), "# My own index\n\nMine.\n")
+        self.assertTrue((T / "easel INDEX.md").exists())
+        self.assertTrue(u.result.get("own_index"))
+        self.assertIn("easel INDEX.md", u.report)
+        ok, bad, broken, leftovers, orphans = easel.check_links(T)
+        self.assertEqual(bad, 0, broken)
+        self.assertEqual(u.checks["user_changed"], 0)
+        # personal text and properties in easel's index survive
+        idx = T / "easel INDEX.md"
+        text = idx.read_text(encoding="utf-8")
+        self.assertIn("## My notes", text)
+        idx.write_text(text.replace("updated:", "cssclasses: [wide]\nupdated:", 1) + "\nIndex thoughts.\n", encoding="utf-8")
+        b = make_bundle()
+        b["assignments"][1]["submission"] = {"id": 7002, "workflow_state": "graded", "score": 30, "files": [], "comments": []}
+        u = run_unit(b, self.root)
+        out = idx.read_text(encoding="utf-8")
+        self.assertIn("Index thoughts.", out)
+        self.assertIn("cssclasses: [wide]", out)
+        self.assertIn("30 / 40", out)
+        self.assertEqual((T / "INDEX.md").read_text(encoding="utf-8"), "# My own index\n\nMine.\n")
+        # an index the student edited outside My notes stays theirs
+        idx.write_text(out.replace("30 / 40", "30 / 40 (checked)"), encoding="utf-8")
+        u = run_unit(b, self.root)
+        self.assertIn("30 / 40 (checked)", idx.read_text(encoding="utf-8"))
+        self.assertIn("easel INDEX.md", u.result["edited"])
+
+    def test_index_without_record_is_still_ours(self):
+        run_unit(make_bundle(), self.root)
+        T = self.unit_dir()
+        m = json.loads((T / ".easel" / "manifest.json").read_text(encoding="utf-8"))
+        m["notes"] = [n for n in m["notes"] if n["key"] != "index"]       # a 4.4.0 manifest
+        (T / ".easel" / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
+        b = make_bundle()
+        b["assignments"][1]["submission"] = {"id": 7002, "workflow_state": "graded", "score": 30, "files": [], "comments": []}
+        u = run_unit(b, self.root)
+        self.assertIn("30 / 40", (T / "INDEX.md").read_text(encoding="utf-8"))
+        self.assertFalse((T / "easel INDEX.md").exists())
+
+    def test_changed_file_same_size(self):
+        run_unit(make_bundle(), self.root)
+        T = self.unit_dir()
+        f = T / "Files" / "Week 01" / "Week 1 slides (final).pdf"
+        self.assertEqual(f.read_bytes(), b"x" * 10)
+        b = make_bundle()
+        b["files"]["502"]["updated_at"] = "2026-09-01T00:00:00Z"        # same size, new revision
+        u = run_unit(b, self.root, blobs={"502": b"y" * 10})
+        self.assertEqual(f.read_bytes(), b"y" * 10)                       # replaced in place
+        self.assertIn("file changed on Canvas, replaced", u.report)
+        rec = next(x for x in json.loads((T / ".easel" / "manifest.json").read_text(encoding="utf-8"))["files"] if x["id"] == "502")
+        self.assertEqual(rec["sha"], easel.file_sha(f))
+        self.assertEqual(rec["updated_at"], "2026-09-01T00:00:00Z")
+        # the same revision again: nothing downloads, the student's edit is theirs
+        f.write_bytes(b"my notes in the margin")
+        u = run_unit(b, self.root)
+        self.assertEqual(f.read_bytes(), b"my notes in the margin")
+        self.assertEqual(u.plan.fplan["502"]["action"], "reuse")
+        # a new revision while the local copy is edited: the new file lands beside it and the note links to it
+        b["files"]["502"]["updated_at"] = "2026-10-01T00:00:00Z"
+        u = run_unit(b, self.root, blobs={"502": b"z" * 10})
+        self.assertEqual(f.read_bytes(), b"my notes in the margin")
+        new = T / "Files" / "Week 01" / f"Week 1 slides (final) (Canvas {easel.TODAY}).pdf"
+        self.assertEqual(new.read_bytes(), b"z" * 10)
+        week = (T / "3 Weeks" / "Week 01 - Basics.md").read_text(encoding="utf-8")
+        self.assertIn(f"%28Canvas%20{easel.TODAY}%29.pdf", week)
+        self.assertIn("your edited copy is kept", u.report)
+        ok, bad, broken, leftovers, orphans = easel.check_links(T)
+        self.assertEqual(bad, 0, broken)
+        # a failed download of a newer version leaves the old copy linked and the record ready to retry
+        b["files"]["502"]["updated_at"] = "2026-10-05T00:00:00Z"
+        easel.set_origin(ORIGIN)
+        u = easel.Unit("ABC101", easel.find_target(self.root, "ABC101"), self.root)
+        need, _ = easel.plan_unit(u, copy.deepcopy(b))
+        self.assertIn("502", need)
+        u.failed["502"] = "503"
+        easel.finalize(u)
+        week = (T / "3 Weeks" / "Week 01 - Basics.md").read_text(encoding="utf-8")
+        self.assertIn(f"%28Canvas%20{easel.TODAY}%29.pdf", week)
+        self.assertIn("did not download; the old copy stays linked", u.report)
+        rec = next(x for x in json.loads((T / ".easel" / "manifest.json").read_text(encoding="utf-8"))["files"] if x["id"] == "502")
+        self.assertEqual(rec["updated_at"], "2026-10-01T00:00:00Z")
+
+    def test_course_identity_needs_origin_and_id(self):
+        run_unit(make_bundle(), self.root)
+        T = self.unit_dir()
+        other = make_bundle()
+        other["origin"] = "https://canvas.other.edu"
+        easel.set_origin("https://canvas.other.edu")
+        u = easel.Unit("ABC101", T, self.root)
+        self.assertEqual(easel.origin_mismatch(u), "canvas.example.edu")
+        with self.assertRaises(RuntimeError):
+            easel.plan_unit(u, copy.deepcopy(other))
+        self.assertNotEqual(easel.bundle_path("ABC101"), easel.STATE / "bundles" / "ABC101.json")
+        easel.set_origin(ORIGIN)
+        u = easel.Unit("ABC101", T, self.root)
+        with self.assertRaises(RuntimeError):
+            easel.plan_unit(u, copy.deepcopy(other))      # data from another site, same numeric course id
+        # a sibling folder for the other site is found by its own manifest
+        T2 = self.root / "other" / "ABC101 Other Site"
+        (T2 / ".easel").mkdir(parents=True)
+        (T2 / ".easel" / "manifest.json").write_text(json.dumps({"version": 4, "canvas": "https://canvas.other.edu", "course_id": 9, "notes": [], "files": []}), encoding="utf-8")
+        self.assertEqual(easel.find_target(self.root, "ABC101", "canvas.other.edu"), T2)
+        self.assertEqual(easel.find_target(self.root, "ABC101", "canvas.example.edu"), T)
+        self.assertEqual((T / "INDEX.md").exists(), True)
+
+
+class FailedReads(unittest.TestCase):
+    """Q12: a failed Canvas read keeps the last good data and says so."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="easel-q12-"))
+        p = easel.bundle_path("ABC101")
+        if p.exists():
+            p.unlink()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def unit_dir(self):
+        return next(self.root.glob("ABC101*"))
+
+    @staticmethod
+    def failed_submissions():
+        b = make_bundle()
+        b["api_status"] = {"submissions": 503}
+        for a in b["assignments"]:
+            a["submission"] = None
+        b["feedback_candidates"] = []
+        for fid in ("601", "602"):
+            del b["files"][fid]
+        return b
+
+    def test_failed_submissions_keep_marks(self):
+        run_unit(make_bundle(), self.root, cache=True)
+        T = self.unit_dir()
+        a1 = next((T / "2 Assessments").glob("Assignment 1*.md"))
+        u = run_unit(self.failed_submissions(), self.root)
+        text = a1.read_text(encoding="utf-8")
+        self.assertIn("Marked: **15 / 20**", text)
+        self.assertIn("Expand section 2.", text)
+        self.assertIn("**✓ High Distinction**", text)
+        self.assertIn("80%", (T / "2 Assessments" / "Grades.md").read_text(encoding="utf-8"))
+        self.assertIn("INCOMPLETE", u.summary)
+        self.assertIn("your submissions and marks (HTTP 503): kept from", u.summary)
+        self.assertIn("INCOMPLETE:", u.report)
+        self.assertTrue((T / "Files" / a1.stem / "Your submission" / "my report.pdf").exists())
+        rows = json.loads((T / ".easel" / "coverage.json").read_text(encoding="utf-8"))["rows"]
+        by = {(r["kind"], r["title"]): r for r in rows}
+        self.assertEqual(by[("submission", "your submissions")]["outcome"], "copied")
+        self.assertIn("kept from", by[("submission", "your submissions")]["detail"])
+
+        class Srv:
+            units = {u.code: u}
+            viewer_expected = []
+
+            class run:
+                @staticmethod
+                def status():
+                    return {}
+        out = easel.summary_text(Srv, 10)
+        self.assertIn("INCOMPLETE", out)
+        self.assertIn("the update is incomplete, run easel again later", out)
+        ok, bad, broken, leftovers, orphans = easel.check_links(T)
+        self.assertEqual(bad, 0, broken)
+
+    def test_failed_submissions_without_earlier_data_freeze_notes(self):
+        run_unit(make_bundle(), self.root)          # no cache: as on a new computer
+        T = self.unit_dir()
+        a1 = next((T / "2 Assessments").glob("Assignment 1*.md"))
+        before = {p: p.read_bytes() for p in [a1, T / "2 Assessments" / "Grades.md", T / "INDEX.md"]}
+        u = run_unit(self.failed_submissions(), self.root)
+        for p, data in before.items():
+            self.assertEqual(p.read_bytes(), data, p.name)
+        self.assertIn(a1.name, u.result["frozen"])
+        self.assertIn("Grades.md", u.result["frozen"])
+        self.assertIn("INDEX.md", u.result["frozen"])
+        self.assertIn("nothing earlier to keep", u.summary)
+        m = json.loads((T / ".easel" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertTrue(all(n["sha"] for n in m["notes"]))
+        # the next good run writes them again
+        u = run_unit(make_bundle(), self.root)
+        self.assertEqual(u.incomplete, [])
+        self.assertEqual(u.result["written"], [])
+
+    def test_failed_page_and_cut_off_list(self):
+        run_unit(make_bundle(), self.root, cache=True)
+        T = self.unit_dir()
+        b = make_bundle()
+        page = b["modules"][0]["items"][0]
+        page.clear()
+        page.update({"id": 11, "type": "Page", "title": "Welcome", "page_url": "welcome", "html_url": f"{ORIGIN}/courses/9/pages/welcome", "status": 503, "locked": True})
+        b["announcements"] = []
+        b["api_status"] = {"announcements": "incomplete", "pages": 403}
+        u = run_unit(b, self.root)
+        week = (T / "3 Weeks" / "Week 01 - Basics.md").read_text(encoding="utf-8")
+        self.assertIn("Hello. Slides:", week)
+        self.assertNotIn("HTTP 503", week)
+        self.assertIn("Hi all.", (T / "1 Course Info" / "Announcements.md").read_text(encoding="utf-8"))
+        self.assertIn("the announcements (the list was cut off): kept from", u.summary)
+        self.assertIn("1 item did not load today: kept from", u.summary)
+        self.assertNotIn("page list", u.summary)           # 403 is Canvas's answer, not a failure
+        rows = json.loads((T / ".easel" / "coverage.json").read_text(encoding="utf-8"))["rows"]
+        by = {(r["kind"], r["title"]): r for r in rows}
+        self.assertEqual(by[("page", "Welcome")]["outcome"], "copied")
+        self.assertIn("kept from", by[("page", "Welcome")]["detail"])
+        self.assertEqual(by[("page", "page list")]["outcome"], "refused")
+        self.assertEqual(u.result["written"], [])
+        # no cache, a failed page: the week note stays as it was
+        easel.bundle_path("ABC101").unlink()
+        u = run_unit(b, self.root)
+        self.assertIn("Hello. Slides:", (T / "3 Weeks" / "Week 01 - Basics.md").read_text(encoding="utf-8"))
+        self.assertIn("Week 01 - Basics.md", u.result["frozen"])
+
+    def test_feedback_failure_keeps_annotations_and_retries(self):
+        fb_ok = {"results": [{"key": "7001-601", "status": "ok", "pdf": base64.b64encode(PDF).decode(),
+                              "annotations": [{"id": "a1", "type": "text", "page": 0, "author": "Dr Tutor", "contents": "Cite this."}]}]}
+        run_unit(make_bundle(), self.root, feedback=fb_ok)
+        T = self.unit_dir()
+        a1 = next((T / "2 Assessments").glob("Assignment 1*.md"))
+        self.assertIn("Cite this.", a1.read_text(encoding="utf-8"))
+        # the mark is 47 days old, so the ordinary timed recheck does not apply
+        fb_bad = {"results": [{"key": "7001-601", "status": "annotations HTTP 503"}]}
+        easel.set_origin(ORIGIN)
+        u = easel.Unit("ABC101", T, self.root)
+        need, keys = easel.plan_unit(u, make_bundle())
+        self.assertEqual(keys, [])                                   # checked and fine: nothing to do
+        # a check that failed a day ago is tried again, whatever the age of the mark
+        m = json.loads((T / ".easel" / "manifest.json").read_text(encoding="utf-8"))
+        m["feedback"]["7001-601"]["attempted_at"] = (easel.NOW - easel.timedelta(hours=25)).isoformat()
+        m["feedback"]["7001-601"]["status"] = "merge timed out"
+        (T / ".easel" / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
+        u = easel.Unit("ABC101", T, self.root)
+        need, keys = easel.plan_unit(u, make_bundle())
+        self.assertEqual(keys, ["7001-601"])
+        u = run_unit(make_bundle(), self.root, feedback=fb_bad)
+        self.assertIn("Cite this.", a1.read_text(encoding="utf-8"))   # the last good copy stays
+        self.assertEqual(len(list((T / "Files").rglob("*(annotated).pdf"))), 1)
+        self.assertIn("annotated feedback for Assignment 1: Report [Individual] (annotations HTTP 503): the last good copy is kept", u.summary)
+        entry = json.loads((T / ".easel" / "manifest.json").read_text(encoding="utf-8"))["feedback"]["7001-601"]
+        self.assertEqual(entry["status"], "annotations HTTP 503")
+        self.assertEqual(len(entry["annotations"]), 1)
+        # just tried: not again within 20 hours
+        u = easel.Unit("ABC101", T, self.root)
+        need, keys = easel.plan_unit(u, make_bundle())
+        self.assertEqual(keys, [])
+        # a good check a day later clears the failure
+        m = json.loads((T / ".easel" / "manifest.json").read_text(encoding="utf-8"))
+        m["feedback"]["7001-601"]["attempted_at"] = (easel.NOW - easel.timedelta(hours=25)).isoformat()
+        (T / ".easel" / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
+        u = run_unit(make_bundle(), self.root, feedback=fb_ok)
+        entry = json.loads((T / ".easel" / "manifest.json").read_text(encoding="utf-8"))["feedback"]["7001-601"]
+        self.assertEqual(entry["status"], "ok")
+        self.assertEqual(u.incomplete, [])
+
+
 class EditedStaysEdited(unittest.TestCase):
     """A note the student edited stays theirs on the first v4 run and on every run after it."""
 
@@ -671,12 +1042,27 @@ class Server(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+class BrowserScripts(unittest.TestCase):
+    """scrape.js and viewer.js against fake Canvas replies, under Node with jsdom (easel/tests/browser)."""
+
+    def test_scripts_under_jsdom(self):
+        here = ROOT / "tests" / "browser"
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed; run: cd easel/tests/browser && npm install && npm test")
+        if not (here / "node_modules" / "jsdom").is_dir():
+            self.skipTest("jsdom is not installed; run: cd easel/tests/browser && npm install && npm test")
+        r = subprocess.run([node, "test_scripts.mjs"], cwd=str(here), capture_output=True, text=True, encoding="utf-8", timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("browser-script tests passed", r.stdout)
+
+
 class Updates(unittest.TestCase):
     """The helper updates itself from the latest release, served here the way GitHub serves it."""
 
-    def run_update(self, kit, base):
+    def run_update(self, kit, base, **env_extra):
         env = {k: v for k, v in os.environ.items() if k != "EASEL_NO_UPDATE"}
-        env.update(EASEL_HOME=TMP_HOME, EASEL_FROM=base)
+        env.update(EASEL_HOME=TMP_HOME, EASEL_FROM=base, **env_extra)
         return subprocess.run([sys.executable, str(kit / "scripts" / "easel.py"), "update"], env=env,
                               capture_output=True, text=True, encoding="utf-8", timeout=60).stdout
 
@@ -694,15 +1080,30 @@ class Updates(unittest.TestCase):
         self.httpd.server_close()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_update_from_newer_release(self):
-        (self.release / "VERSION").write_text("9.9.9 (test)\n", encoding="utf-8")
+    def publish(self, version="9.9.9"):
+        """Make the served release a new version: VERSION and the helper's own constant agree, as a real release does."""
+        (self.release / "VERSION").write_text(f"{version} (test)\n", encoding="utf-8")
         helper = (self.release / "easel.py").read_text(encoding="utf-8")
-        (self.release / "easel.py").write_text(helper.replace('VERSION = "', '# updated in test\nVERSION = "', 1), encoding="utf-8")
+        (self.release / "easel.py").write_text(helper.replace(f'VERSION = "{easel.VERSION}"', f'# updated in test\nVERSION = "{version}"', 1), encoding="utf-8")
+
+    def files(self, kit):
+        return {rel: (kit / rel).read_bytes() for rel in easel.KIT_FILES.values()}
+
+    def release_files(self):
+        return {rel: (self.release / name).read_bytes() for name, rel in easel.KIT_FILES.items()}
+
+    def leftovers(self, kit):
+        return sorted(p.name for p in kit.iterdir() if p.name.startswith((".update-", ".rollback-")))
+
+    def test_update_from_newer_release(self):
+        self.publish()
         out = self.run_update(self.kit, self.base)
-        self.assertIn(f"easel updated from {easel.VERSION} to 9.9.9.", out, out)
-        self.assertEqual((self.kit / "VERSION").read_text(encoding="utf-8"), "9.9.9 (test)\n")
-        self.assertIn("# updated in test", (self.kit / "scripts" / "easel.py").read_text(encoding="utf-8"))
-        self.assertEqual([p.name for p in self.kit.iterdir() if p.name.startswith(".update-")], [])
+        self.assertIn(f"easel updated from {easel.VERSION} to 9.9.9 in ", out, out)
+        self.assertEqual(self.files(self.kit), self.release_files())
+        self.assertEqual(self.leftovers(self.kit), [])
+        rec = json.loads((self.kit / easel.INSTALLED).read_text(encoding="utf-8"))
+        self.assertEqual((rec["version"], rec["state"]), ("9.9.9", "ok"))
+        self.assertEqual(easel.kit_problems(self.kit), [])
         self.assertIn("is up to date", self.run_update(self.kit, self.base))
 
     def test_missing_release_changes_nothing(self):
@@ -710,6 +1111,74 @@ class Updates(unittest.TestCase):
         out = self.run_update(self.kit, self.base + "/missing")
         self.assertIn("Couldn't check for updates", out, out)
         self.assertEqual({p: p.read_bytes() for p in self.kit.rglob("*") if p.is_file()}, before)
+
+    def test_incomplete_download_changes_nothing(self):
+        """A release whose helper does not match its VERSION is refused before any file moves."""
+        (self.release / "VERSION").write_text("9.9.9 (test)\n", encoding="utf-8")
+        before = self.files(self.kit)
+        out = self.run_update(self.kit, self.base)
+        self.assertIn("could not be downloaded", out, out)
+        self.assertIn(f"Carrying on with {easel.VERSION}", out)
+        self.assertEqual(self.files(self.kit), before)
+        self.assertEqual(self.leftovers(self.kit), [])
+        self.assertFalse((self.kit / easel.INSTALLED).exists())
+
+    def test_failed_replacement_puts_old_files_back(self):
+        """A folder where viewer.js should be makes the replacement fail after easel.py and scrape.js were replaced."""
+        self.publish()
+        before = self.files(self.kit)
+        (self.kit / "scripts" / "viewer.js").unlink()
+        (self.kit / "scripts" / "viewer.js").mkdir()
+        (self.kit / "scripts" / "viewer.js" / "in the way.txt").write_text("x", encoding="utf-8")
+        out = self.run_update(self.kit, self.base)
+        self.assertIn("failed to install", out, out)
+        self.assertIn(f"The {easel.VERSION} files were put back", out)
+        self.assertIn(f"Carrying on with {easel.VERSION}", out)
+        for rel in ("VERSION", "SKILL.md", "scripts/easel.py", "scripts/scrape.js"):
+            self.assertEqual((self.kit / rel).read_bytes(), before[rel], rel)
+        self.assertEqual(self.leftovers(self.kit), [])
+        self.assertFalse((self.kit / easel.INSTALLED).exists())
+        # Once the obstacle is gone, the next run installs the release.
+        shutil.rmtree(self.kit / "scripts" / "viewer.js")
+        (self.kit / "scripts" / "viewer.js").write_bytes(before["scripts/viewer.js"])
+        out = self.run_update(self.kit, self.base)
+        self.assertIn(f"easel updated from {easel.VERSION} to 9.9.9", out, out)
+        self.assertEqual(self.files(self.kit), self.release_files())
+
+    def test_mixed_files_are_repaired(self):
+        """VERSION already says the new version, but the helper and scrape.js are older files. The next run repairs them."""
+        self.publish()
+        (self.kit / "VERSION").write_text("9.9.9 (test)\n", encoding="utf-8")
+        (self.kit / "scripts" / "scrape.js").write_text("// a stale file\n", encoding="utf-8")
+        self.assertTrue(easel.kit_problems(self.kit))
+        out = self.run_update(self.kit, self.base)
+        self.assertIn("easel repaired its 9.9.9 files in ", out, out)
+        self.assertEqual(self.files(self.kit), self.release_files())
+        self.assertEqual(easel.kit_problems(self.kit), [])
+        self.assertIn("is up to date", self.run_update(self.kit, self.base))
+        # A file that changes after a good update is found through the recorded hashes.
+        (self.kit / "scripts" / "viewer.js").write_text("// damaged later\n", encoding="utf-8")
+        self.assertEqual(easel.kit_problems(self.kit), ["scripts/viewer.js is not the 9.9.9 file"])
+        self.assertIn("easel repaired", self.run_update(self.kit, self.base))
+        self.assertEqual(self.files(self.kit), self.release_files())
+
+    def test_second_copy_is_updated_too(self):
+        """A copy in ~/.claude/skills/easel also updates ~/.agents/skills/easel when it exists."""
+        self.publish()
+        home = self.tmp / "home"
+        first, second = home / ".claude" / "skills" / "easel", home / ".agents" / "skills" / "easel"
+        shutil.copytree(self.kit, first)
+        shutil.copytree(self.kit, second)
+        (second / "VERSION").write_text("1.0.0 (old)\n", encoding="utf-8")
+        env = {"HOME": str(home), "USERPROFILE": str(home)}
+        out = self.run_update(first, self.base, **env)
+        self.assertIn("easel updated from", out, out)
+        self.assertIn("~/.claude/skills/easel and ~/.agents/skills/easel", out)
+        self.assertEqual(self.files(first), self.release_files())
+        self.assertEqual(self.files(second), self.release_files())
+        self.assertIn("is up to date", self.run_update(first, self.base, **env))
+        # A copy outside those two folders updates only itself.
+        self.assertNotIn("~/.agents", self.run_update(self.kit, self.base, **env))
 
 
 if __name__ == "__main__":

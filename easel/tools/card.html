@@ -2,7 +2,7 @@
 <!--
   Source of easel/site/card.png, the 1280x640 link preview card.
   GitHub shows it when someone shares the repository link (Settings, Social preview).
-  The install page uses it as og:image.
+  The install page uses it as og:image. The note on the card is made up.
 
   To render it again on macOS, run from the repository root:
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --disable-gpu --hide-scrollbars \
@@ -17,39 +17,54 @@
   * { box-sizing: border-box; margin: 0; }
   html, body { width: 1280px; height: 640px; overflow: hidden; }
   body {
-    background: #faf8f5; color: #1f2328; display: flex; align-items: center; gap: 56px; padding: 0 80px;
+    background: #faf8f5; color: #1f2328; display: flex; align-items: center; gap: 48px; padding: 0 72px;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   }
-  .left { flex: 1.15; }
-  h1 { font-size: 112px; line-height: 1; letter-spacing: -0.04em; font-weight: 800; }
-  .tag { font-size: 34px; line-height: 1.25; margin: 18px 0 36px; color: #3b434c; }
-  .label { font-size: 21px; font-weight: 600; color: #b5532e; margin-bottom: 10px; letter-spacing: 0.01em; }
-  .paste {
-    font: 24px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #1f2328;
-    background: #ffffff; border: 2px solid #e4dfd7; border-left: 8px solid #b5532e; border-radius: 12px; padding: 18px 22px;
+  .left { flex: 0 0 430px; }
+  h1 { font-size: 118px; line-height: 0.95; letter-spacing: -0.045em; font-weight: 800; margin-bottom: 22px; }
+  .tag { font-size: 32px; line-height: 1.25; color: #1f2328; margin-bottom: 26px; }
+  .foot { font-size: 20px; line-height: 1.5; color: #59636e; }
+  .foot b { color: #b5532e; font-weight: 700; }
+  .note {
+    flex: 1; background: #ffffff; border: 2px solid #e4dfd7; border-radius: 20px; overflow: hidden;
+    box-shadow: 0 24px 48px -28px rgba(0,0,0,.35);
   }
-  .right {
-    flex: 0.85; background: #ffffff; border: 2px solid #e4dfd7; border-radius: 18px; padding: 30px 32px;
-    font: 23px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace; color: #3b434c; white-space: pre;
-  }
-  .right b { color: #1f2328; }
-  .foot { position: absolute; bottom: 34px; left: 80px; font-size: 20px; color: #59636e; }
+  .bar { background: #f3efe9; border-bottom: 2px solid #e4dfd7; padding: 12px 24px; font: 17px ui-monospace, SFMono-Regular, Menlo, monospace; color: #59636e; }
+  .body { padding: 22px 28px 24px; }
+  h2 { font-size: 30px; letter-spacing: -0.02em; line-height: 1.15; margin-bottom: 14px; }
+  .call { border-left: 6px solid #2f7d4a; background: #e9f4ec; border-radius: 0 10px 10px 0; padding: 10px 16px; font-size: 21px; margin-bottom: 18px; }
+  table { border-collapse: collapse; width: 100%; font-size: 19px; margin-bottom: 18px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 2px solid #e4dfd7; }
+  th { color: #59636e; font-size: 16px; font-weight: 600; }
+  td.n, th.n { text-align: right; }
+  tr.hit td { background: #e9f4ec; font-weight: 600; }
+  tr.hit td:first-child::before { content: "✓ "; color: #2f7d4a; }
+  blockquote { border-left: 6px solid #e4dfd7; padding: 8px 16px; font-size: 19px; line-height: 1.4; color: #3b434c; margin-bottom: 16px; }
+  blockquote b { color: #1f2328; }
+  .mine { background: #f3efe9; border-radius: 10px; padding: 10px 16px; font-size: 19px; }
+  .mine b { color: #59636e; font-weight: 600; margin-right: 8px; }
 </style>
 </head>
 <body>
   <div class="left">
     <h1>easel</h1>
-    <p class="tag">Your Canvas units, as clean<br>Markdown notes.</p>
-    <p class="label">Paste into Claude Code:</p>
-    <p class="paste">Install easel from<br>github.com/adamalshoomary/easel</p>
+    <p class="tag">Your Canvas units, as clean Markdown notes.</p>
+    <p class="foot">Brief, rubric, submission, mark and feedback in one note per assessment.<br><b>Install in Claude Code.</b></p>
   </div>
-  <div class="right"><b>IFB220 Introduction to AI/</b>
-├── INDEX.md
-├── 1 Course Info/
-├── 2 Assessments/
-│   └── Grades.md
-├── 3 Weeks/
-└── Files/</div>
-  <p class="foot">Weeks · assessments · rubrics · marks · feedback · grades</p>
+  <div class="note">
+    <div class="bar">ABC123 Design Thinking / 2 Assessments / Assessment 1 - Case study workbook.md</div>
+    <div class="body">
+      <h2>Assessment 1: Case study workbook</h2>
+      <p class="call">Marked: <b>38 / 50</b> (76%) · grade Distinction (6)</p>
+      <table>
+        <tr><th>Criterion</th><th class="n">Points</th><th>Your level</th><th class="n">Yours</th></tr>
+        <tr><td>Engagement with the weekly activities</td><td class="n">20</td><td>Distinction</td><td class="n">16</td></tr>
+        <tr class="hit"><td>Depth of reflection</td><td class="n">20</td><td>Credit</td><td class="n">14</td></tr>
+        <tr><td>Visual communication</td><td class="n">10</td><td>Distinction</td><td class="n">8</td></tr>
+      </table>
+      <blockquote><b>Dr Lee Tutor</b> · Strong documentation and a professional layout. Lead with why a method was useful, then what happened.</blockquote>
+      <p class="mine"><b>My notes</b> Lead with the reasoning in A2.</p>
+    </div>
+  </div>
 </body>
 </html>

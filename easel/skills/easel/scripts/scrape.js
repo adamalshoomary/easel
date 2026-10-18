@@ -20,30 +20,48 @@ async function slot(fn) {
   try { return await fn(); } finally { inFlight--; const next = waiting.shift(); if (next) next(); }
 }
 
+// One Canvas read. The result says what happened, so the helper can tell a real answer from a failure:
+//   {status, data}                    a complete answer (status 200) or Canvas's refusal (401, 403, 404)
+//   {status: 0, data: null}           the network failed
+//   {status, data, malformed: true}   status 200 but the body was not JSON
+//   {status, data, partial: true}     a later page of a list failed; data holds the pages that arrived
+// Throttling (HTTP 429, or 403 with "rate limit") and server errors are retried with bounded waits: the
+// Retry-After header when Canvas sends one, else 1.5 s, 3 s, 4.5 s and 6 s, at most five tries.
+const RETRY_MAX_MS = 10000;
+async function retryWait(res, i) {
+  const ra = parseFloat(res.headers.get('Retry-After') || '');
+  return Math.min(RETRY_MAX_MS, Number.isFinite(ra) && ra > 0 ? ra * 1000 : 1500 * (i + 1));
+}
 async function api(url, {all = false, tries = 5} = {}) {
   let out = [], next = url.startsWith('http') ? url : ORIGIN + url, status = 0;
   while (next) {
     const r = await slot(async () => {
-      let res;
+      let res = null;
       for (let i = 0; i < tries; i++) {
-        res = await fetch(next, {headers: {Accept: 'application/json'}, credentials: 'include'});
-        if (res.status === 403 && /rate limit/i.test(await res.clone().text())) { await sleep(1500 * (i + 1)); continue; }
-        if (res.status >= 500) { await sleep(1000 * (i + 1)); continue; }
+        try { res = await fetch(next, {headers: {Accept: 'application/json'}, credentials: 'include'}); }
+        catch (e) { res = null; await sleep(1000 * (i + 1)); continue; }
+        if (res.status === 429 || (res.status === 403 && /rate limit/i.test(await res.clone().text()))) { await sleep(await retryWait(res, i)); continue; }
+        if (res.status >= 500) { await sleep(await retryWait(res, i)); continue; }
         break;
       }
       return res;
     });
+    if (!r) return all && out.length ? {status: 0, data: out, partial: true} : {status: 0, data: null};
     status = r.status;
     const txt = (await r.text()).replace(/^while\(1\);/, '');
-    let data; try { data = JSON.parse(txt); } catch { data = null; }
-    if (!r.ok) return {status, data};
+    let data, malformed = false; try { data = JSON.parse(txt); } catch { data = null; malformed = r.ok; }
+    if (!r.ok) return all && out.length ? {status, data: out, partial: true} : {status, data};
+    if (malformed) return all && out.length ? {status, data: out, partial: true} : {status, data, malformed: true};
     if (!all) return {status, data};
-    out = out.concat(Array.isArray(data) ? data : []);
+    if (!Array.isArray(data)) return out.length ? {status, data: out, partial: true} : {status, data, malformed: true};
+    out = out.concat(data);
     const m = (r.headers.get('Link') || '').match(/<([^>]+)>;\s*rel="next"/);
     next = m ? m[1] : null;
   }
   return {status, data: out};
 }
+// What the bundle records for a list read: 200, Canvas's refusal, 0 for a network failure, or a word.
+const st = (r) => r.partial ? 'incomplete' : (r.malformed || (r.status === 200 && !Array.isArray(r.data) && r.data !== null && typeof r.data !== 'object')) ? 'malformed' : r.status;
 
 // GraphQL is a POST, but these queries only read.
 async function graphql(query, variables) {
@@ -307,7 +325,7 @@ async function scrapeUnit(U) {
     graphql('query($id: ID!) { course(id: $id) { gradingStandard { title data { letterGrade baseValue } } } }', {id: String(cid)}),
     api(`/api/v1/calendar_events?context_codes[]=course_${cid}&all_events=true&per_page=100`, {all: true}),
   ]);
-  const ok = (r) => r.status === 200 && Array.isArray(r.data) ? r.data : [];
+  const ok = (r) => r.status === 200 && !r.partial && Array.isArray(r.data) ? r.data : [];
 
   const allFiles = new Set();
   const allMedia = new Map();
@@ -336,17 +354,18 @@ async function scrapeUnit(U) {
   });
   const staffIds = new Set(staff.map(s => s.id));
   const groups = [];
-  for (const g of ok(await myGroups())) {
+  const groupsList = await myGroups();
+  for (const g of ok(groupsList)) {
     if (String(g.course_id) !== String(cid)) continue;
     const m = await api(`/api/v1/groups/${g.id}/users?per_page=100`, {all: true});
-    groups.push({id: g.id, name: g.name, members: ok(m).map(u => u.name)});
+    groups.push({id: g.id, name: g.name, members: ok(m).map(u => u.name), members_status: st(m)});
   }
   const convs = new Map();
   for (const c of [...ok(inboxA), ...ok(inboxB)]) convs.set(c.id, c);
   const inbox = [], inbox_skipped = [];
   await pool([...convs.values()], 4, async (c) => {
     const r = await api(`/api/v1/conversations/${c.id}?auto_mark_as_read=false`);
-    if (r.status !== 200 || !r.data) { inbox_skipped.push({id: c.id, subject: c.subject || '(no subject)', reason: 'HTTP ' + r.status}); return; }
+    if (r.status !== 200 || !r.data) { inbox_skipped.push({id: c.id, subject: c.subject || '(no subject)', reason: 'HTTP ' + r.status, status: r.status}); return; }
     const who = {};
     for (const p of (r.data.participants || [])) who[p.id] = p.name || p.full_name;
     const msgs = (r.data.messages || []).map(m => ({author: who[m.author_id] || null, author_id: m.author_id, staff: staffIds.has(m.author_id),
@@ -402,8 +421,8 @@ async function scrapeUnit(U) {
 
   const discById = {};
   for (const d of ok(disc)) discById[d.id] = d;
-  const modules = mods.data || [];
-  for (const m of modules) if (!m.items && m.items_url) m.items = ok(await api(m.items_url + '?per_page=100', {all: true}));
+  const modules = ok(mods);
+  for (const m of modules) if (!m.items && m.items_url) { const r = await api(m.items_url + '?per_page=100', {all: true}); m.items = ok(r); m.items_status = st(r); }
 
   const repliesOf = async (tid) => {
     const r = await api(`${B}/discussion_topics/${tid}/view`);
@@ -422,7 +441,7 @@ async function scrapeUnit(U) {
   const quizAttempts = async (qid, base) => {
     const r = await api(`${B}/quizzes/${qid}/submissions`);
     const subsQ = r.status === 200 && r.data && Array.isArray(r.data.quiz_submissions) ? r.data.quiz_submissions : [];
-    const out = {status: r.status, attempts: []};
+    const out = {status: r.status === 200 && !(r.data && Array.isArray(r.data.quiz_submissions)) ? 'malformed' : r.status, attempts: []};
     for (const s of subsQ) {
       if (s.workflow_state !== 'complete' && s.workflow_state !== 'pending_review') continue;
       const q = await api(`/api/v1/quiz_submissions/${s.id}/questions`);
@@ -471,7 +490,7 @@ async function scrapeUnit(U) {
     return {id: a.id, title: a.title, posted_at: a.posted_at || a.delayed_post_at || a.created_at, author: a.author && a.author.display_name,
       html_url: a.html_url, message_md: md(a.message, a.html_url), attachments: (a.attachments || []).map(x => String(x.id))};
   });
-  const cs = crs.data || {};
+  const cs = (crs.status === 200 && crs.data) || {};
   const syllabus_md = md(cs.syllabus_body, `${ORIGIN}/courses/${cid}/assignments/syllabus`);
 
   // content that no module links to: pages (the home page too), discussions and course files
@@ -546,16 +565,16 @@ async function scrapeUnit(U) {
     staff, groups, inbox, inbox_skipped, media, refs, tools, student_locale: CFG.locale || null,
     events: ok(eventsR).map(e => ({id: e.id, title: e.title, start_at: e.start_at, end_at: e.end_at, all_day: !!e.all_day, location: e.location_name || null,
       description_md: md(e.description, e.html_url), html_url: e.html_url})),
-    modules: modules.map(m => ({id: m.id, name: m.name, position: m.position, unlock_at: m.unlock_at, state: m.state, items_count: m.items_count,
+    modules: modules.map(m => ({id: m.id, name: m.name, position: m.position, unlock_at: m.unlock_at, state: m.state, items_count: m.items_count, items_status: m.items_status || 200,
       items: (m.items || []).map(it => ({id: it.id, type: it.type, title: it.title, indent: it.indent, content_id: it.content_id, page_url: it.page_url,
         html_url: it.html_url, external_url: it.external_url, published: it.published, ...it.x}))})),
     assignments, announcements, syllabus_md,
     assignment_groups, group_weights: !!cs.apply_assignment_group_weights, extra_pages, extra_discussions, extra_files,
     files: Object.fromEntries(Object.entries(fileMeta).map(([k, v]) => { const {url, ...rest} = v; return [k, rest]; })),
     feedback_candidates: feedbackCandidates,
-    api_status: {modules: mods.status, assignments: asg.status, announcements: ann.status, course: crs.status, assignment_groups: groupsR.status,
-                 submissions: subs.status, pages: pagesAll.status, files: filesAll.status, discussions: disc.status, staff: staffR.status,
-                 inbox: inboxA.status, grading_scheme: scheme.status, events: eventsR.status},
+    api_status: {modules: st(mods), assignments: st(asg), announcements: st(ann), course: crs.status === 200 && !crs.data ? 'malformed' : crs.status,
+                 assignment_groups: st(groupsR), submissions: st(subs), pages: st(pagesAll), files: st(filesAll), discussions: st(disc), staff: st(staffR),
+                 inbox: st(inboxA) === 200 ? st(inboxB) : st(inboxA), grading_scheme: scheme.status, events: st(eventsR), groups: st(groupsList)},
     fetch_ms: Math.round(performance.now() - t0),
     coverage,
   };
