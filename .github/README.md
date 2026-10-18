@@ -68,7 +68,7 @@ Open a new Claude Code chat in your notes folder. Then run this command:
 
 Use your own unit codes and Canvas address. Later runs need only the unit codes. On the first run, if Chrome shows a box about other apps and services on this device, click **Allow**. If Canvas shows its sign-in page, sign in.
 
-If Claude says a safety check stopped the browser step, run the command again in a new chat.
+If Claude says a safety check stopped the browser step, run the command again in a new chat. If Claude says Chrome is not connected, type `/chrome` in Claude Code, choose **Enabled by default**, and run the command again.
 
 Each unit gets one folder, ready for Obsidian or any Markdown app:
 
@@ -81,7 +81,7 @@ IFB220 Introduction to AI/
 └── Files/              attachments, submissions, feedback PDFs, transcripts, slide text
 ```
 
-Each assessment note holds the brief, the rubric with the level you reached on each criterion, your submitted files, the mark, the marker's comments and the marked-up PDF. The [install page](https://adamalshoomary.github.io/easel/) shows one.
+Each assessment note holds the brief, the rubric with the level you reached on each criterion, your submitted files, the mark, the marker's comments and the marked-up PDF.
 
 Lecture slides and Word handouts get a text file beside them, so you can search them. Each unit folder also keeps a list of everything Canvas showed easel and what it did with each item, in `.easel/coverage.md`.
 

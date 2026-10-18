@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>easel: your Canvas units as Markdown notes</title>
-<meta name="description" content="easel copies your Canvas units into Markdown notes: one note per week and one per assessment, with the brief, rubric, your submission, mark and feedback. Install it in Claude Code.">
+<meta name="description" content="easel copies your Canvas units into Markdown notes: weeks, assessments, rubrics, marks, feedback, grades, lecture transcripts and slides, in one folder per unit. Install it in Claude Code.">
 <meta property="og:type" content="website">
 <meta property="og:title" content="easel">
-<meta property="og:description" content="Your Canvas units, as clean Markdown notes. Brief, rubric, submission, mark and feedback in one note per assessment.">
+<meta property="og:description" content="Your Canvas units, as clean Markdown notes. Weeks, assessments, rubrics, marks, feedback and grades, in one folder per unit.">
 <meta property="og:url" content="https://adamalshoomary.github.io/easel/">
 <meta property="og:image" content="https://adamalshoomary.github.io/easel/card.png">
 <meta property="og:image:width" content="1280">
@@ -18,110 +18,101 @@
 <style>
   :root {
     --bg: #faf8f5; --fg: #1f2328; --muted: #59636e; --panel: #ffffff; --line: #e4dfd7;
-    --accent: #b5532e; --accent-fg: #ffffff; --code: #f3efe9; --ok: #2f7d4a; --ok-bg: #e9f4ec; --info-bg: #eef3f8; --info: #2b5b8a;
+    --accent: #b5532e; --accent-fg: #ffffff; --code: #f3efe9;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0f1115; --fg: #e6e8eb; --muted: #9aa3ad; --panel: #171a20; --line: #2a2f37;
-      --accent: #e07a52; --accent-fg: #14161a; --code: #1e222a; --ok: #7fcf98; --ok-bg: #16281c; --info-bg: #182230; --info: #8fb8e3;
+      --accent: #e07a52; --accent-fg: #14161a; --code: #1e222a;
     }
   }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
-    font: 17px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font: 18px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   }
-  main { max-width: 760px; margin: 0 auto; padding: 48px 20px 40px; }
+  main { max-width: 980px; margin: 0 auto; padding: 72px 24px 56px; }
   a { color: var(--accent); }
   a:focus-visible, button:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
-  code, pre, .path { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  pre { background: var(--code); border-radius: 8px; padding: 10px 12px; margin: 0; overflow-x: auto; }
-  h2 { font-size: 26px; line-height: 1.2; letter-spacing: -0.02em; margin: 56px 0 12px; }
-  h3 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 24px 0 8px; }
-  p { margin: 0 0 12px; }
+  code, pre { font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  pre { background: var(--code); border-radius: 10px; padding: 14px 16px; margin: 0; overflow-x: auto; }
+  h2 { font-size: 30px; line-height: 1.15; letter-spacing: -0.025em; margin: 0 0 20px; }
+  h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  p { margin: 0 0 14px; }
+  section { margin: 0 0 80px; }
   .muted { color: var(--muted); }
 
   /* Top */
-  header { padding: 8px 0 0; }
-  header h1 { font-size: 72px; line-height: 0.95; letter-spacing: -0.045em; margin: 0 0 14px; font-weight: 800; }
-  header .lead { font-size: 23px; line-height: 1.35; max-width: 560px; margin: 0 0 10px; }
-  header .sub { color: var(--muted); margin: 0 0 36px; }
-  header .jump { display: inline-block; font-weight: 600; }
-
-  /* The example note */
-  .note {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
-    box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 12px 32px -20px rgba(0,0,0,.25);
-  }
-  .note .bar { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--code); }
-  .note .bar .path { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .note .body { padding: 20px 22px 8px; font-size: 15.5px; }
-  .props { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; font-size: 13.5px; margin: 0 0 18px; padding: 0 0 14px; border-bottom: 1px solid var(--line); }
-  .props dt { color: var(--muted); margin: 0; }
-  .props dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
-  .note h4 { font-size: 22px; line-height: 1.2; letter-spacing: -0.02em; margin: 0 0 14px; }
-  .note h5 { font-size: 16px; margin: 22px 0 8px; padding-top: 14px; border-top: 1px solid var(--line); }
-  .call { border-left: 4px solid var(--info); background: var(--info-bg); border-radius: 0 8px 8px 0; padding: 8px 12px; margin: 0 0 10px; font-size: 14.5px; }
-  .call.ok { border-color: var(--ok); background: var(--ok-bg); }
-  .call b { font-weight: 700; }
-  .note table { border-collapse: collapse; width: 100%; font-size: 14px; margin: 0 0 8px; }
-  .note th, .note td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  .note th { color: var(--muted); font-weight: 600; font-size: 13px; }
-  .note td.n { text-align: right; white-space: nowrap; }
-  .note tr.hit td { background: var(--ok-bg); font-weight: 600; }
-  .note tr.hit td:first-child::before { content: "✓ "; color: var(--ok); }
-  .note .scroll { overflow-x: auto; }
-  .note ul { margin: 0 0 10px; padding-left: 22px; }
-  .note li { margin: 0 0 4px; }
-  .note blockquote { margin: 0 0 10px; padding: 8px 12px; border-left: 4px solid var(--line); color: var(--fg); font-size: 14.5px; }
-  .note blockquote p { margin: 0 0 4px; }
-  .note .mine { background: var(--code); border-radius: 8px; padding: 10px 12px; margin: 0 0 14px; font-size: 14.5px; }
-  .note .mine p { margin: 0; }
-  .caption { font-size: 14px; color: var(--muted); margin: 10px 0 0; }
+  header { display: grid; grid-template-columns: 0.72fr 1.28fr; gap: 44px; align-items: center; margin: 0 0 80px; }
+  header h1 { font-size: 96px; line-height: 0.9; letter-spacing: -0.05em; margin: 0 0 22px; font-weight: 800; }
+  header .lead { font-size: 28px; line-height: 1.25; letter-spacing: -0.015em; margin: 0 0 14px; font-weight: 500; }
+  header .sub { color: var(--muted); font-size: 17px; margin: 0; }
+    .tree { white-space: pre; font-size: 15px; line-height: 1.8; padding: 24px 26px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 24px 48px -28px rgba(0,0,0,.35); border-radius: 16px; }
+  .tree .d { color: var(--accent); font-weight: 600; }
+  .tree .c { color: var(--muted); }
 
   /* Install */
-  .install { display: grid; grid-template-columns: 1.2fr 1fr; gap: 20px; align-items: start; }
-  .primary {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px;
+  .panel {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 20px; padding: 40px 44px;
+    display: grid; grid-template-columns: 1fr 1.1fr; gap: 44px; align-items: center;
+    box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 24px 48px -32px rgba(0,0,0,.3);
   }
-  .btn {
-    display: block; width: 100%; text-align: center; padding: 15px 20px; border-radius: 10px; font-weight: 700; font-size: 18px;
-    text-decoration: none; background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent);
+  .panel h2 { margin: 0 0 12px; font-size: 32px; }
+  .panel p { margin: 0; font-size: 17px; color: var(--muted); max-width: 360px; }
+  .big {
+    display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    background: var(--accent); color: var(--accent-fg); text-decoration: none;
+    font-weight: 700; font-size: 19px; letter-spacing: -0.01em; padding: 18px 22px; border-radius: 12px;
+    transition: transform .12s ease, filter .12s ease;
   }
-  .btn:hover { filter: brightness(1.06); }
-  .btn.second { background: var(--panel); color: var(--fg); border-color: var(--line); font-size: 16px; font-weight: 600; margin-top: 10px; }
-  .primary .hint { font-size: 14px; color: var(--muted); margin: 12px 0 0; }
-  .needs { background: var(--code); border-radius: 14px; padding: 18px 20px; font-size: 15px; }
-  .needs h3 { margin: 0 0 8px; }
-  .needs ul { margin: 0; padding-left: 20px; }
-  .needs li { margin: 0 0 6px; }
-  .copy { display: flex; gap: 8px; align-items: stretch; margin-top: 14px; }
-  .copy code { flex: 1; background: var(--code); border-radius: 8px; padding: 10px 12px; overflow-wrap: anywhere; }
-  button {
-    font: inherit; font-size: 15px; font-weight: 600; padding: 0 16px; border-radius: 8px; cursor: pointer;
-    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  .big:hover { transform: translateY(-1px); filter: brightness(1.05); }
+  .big span { font-size: 22px; line-height: 1; opacity: .9; }
+  .alt { display: block; margin: 14px 2px 22px; font-size: 15px; font-weight: 500; color: var(--muted); }
+  .alt:hover { color: var(--accent); }
+  .copy { display: flex; gap: 8px; align-items: stretch; }
+  .copy code { flex: 1; background: var(--code); border-radius: 10px; padding: 11px 14px; overflow-wrap: anywhere; font-size: 14px; }
+  .copy button {
+    font: inherit; font-size: 14px; font-weight: 600; padding: 0 16px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--fg);
   }
-
-  /* Then, other routes, problems */
-  .tree { white-space: pre; }
-  details { border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; margin: 0 0 12px; background: var(--panel); }
-  summary { cursor: pointer; font-weight: 600; }
-  details p { margin: 12px 0 6px; }
+  .copy button:hover { border-color: var(--muted); }
+  .chips { list-style: none; margin: 22px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; }
+  .chips li { border: 1px solid var(--line); border-radius: 999px; padding: 8px 16px; font-size: 15px; color: var(--muted); background: var(--panel); }
+  .chips li::before { content: "✓ "; color: var(--accent); font-weight: 700; }
+  .chips a { color: var(--fg); }
+  details { margin: 18px 0 0; }
+  summary { cursor: pointer; font-weight: 600; color: var(--muted); }
+  details p { margin: 14px 0 6px; }
   details pre { margin: 0 0 10px; }
-  .steps li { margin: 0 0 8px; }
-  footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
 
-  @media (max-width: 640px) {
-    main { padding: 32px 16px 32px; }
-    header h1 { font-size: 56px; }
-    header .lead { font-size: 20px; }
-    h2 { font-size: 23px; margin-top: 44px; }
-    .install { grid-template-columns: 1fr; }
-    .note .body { padding: 16px 14px 4px; }
-    .note h4 { font-size: 19px; }
-    .props { grid-template-columns: 1fr; gap: 0; }
-    .props dt { margin-top: 6px; }
+  /* Run */
+  .run p { max-width: 620px; }
+  .term { background: #15181d; color: #e6e8eb; border-radius: 18px; overflow: hidden; margin: 24px 0 28px; box-shadow: 0 30px 60px -40px rgba(0,0,0,.6); border: 1px solid rgba(255,255,255,.06); }
+  .term .bar { display: flex; gap: 8px; padding: 14px 18px; border-bottom: 1px solid rgba(255,255,255,.08); }
+  .term .bar i { width: 12px; height: 12px; border-radius: 50%; background: #3a3f48; }
+  .term pre { background: none; padding: 26px 24px 30px; font-size: 17px; color: inherit; }
+  .term .pr { color: var(--accent); font-weight: 700; margin-right: 12px; }
+  .term .cmd { color: #fff; }
+  .three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+  .three b { display: block; font-size: 17px; margin: 0 0 6px; }
+  .three span { color: var(--muted); font-size: 16px; line-height: 1.5; }
+
+  footer { margin-top: 8px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 15px; }
+
+  @media (max-width: 720px) {
+    main { padding: 44px 16px 40px; }
+    header { grid-template-columns: 1fr; gap: 28px; margin-bottom: 64px; }
+    header h1 { font-size: 68px; }
+    header .lead { font-size: 24px; }
+    h2 { font-size: 26px; }
+    section { margin-bottom: 72px; }
+    .panel { grid-template-columns: 1fr; gap: 26px; padding: 28px 22px; }
+    .panel h2 { font-size: 28px; }
+    .term pre { font-size: 14px; padding: 20px 16px 22px; }
+    .three { grid-template-columns: 1fr; gap: 18px; }
+    .tree { font-size: 14px; padding: 16px 18px; }
+    .tree .c { display: none; }
   }
   @media (max-width: 420px) {
     .copy { flex-direction: column; }
@@ -132,146 +123,69 @@
 <body>
 <main>
   <header>
-    <h1>easel</h1>
-    <p class="lead">Your Canvas units, as clean Markdown notes.</p>
-    <p class="sub">One note per week and one per assessment, with the brief, rubric, your submission, mark and feedback, in a folder you own. For Obsidian or any Markdown app.</p>
-    <a class="jump" href="#install">Install in Claude Code ↓</a>
+    <div>
+      <h1>easel</h1>
+      <p class="lead">Your Canvas units, as clean Markdown notes.</p>
+      <p class="sub">Weeks, assessments, rubrics, marks, feedback, grades, lecture transcripts and slides, in one folder per unit. For Obsidian or any Markdown app. Run it again any time: your own notes stay.</p>
+    </div>
+    <pre class="tree"><span class="d">IFB220 Introduction to AI/</span>
+├── INDEX.md          <span class="c">next due date, every assessment</span>
+├── <span class="d">1 Course Info/</span>    <span class="c">staff, groups, announcements, Inbox</span>
+├── <span class="d">2 Assessments/</span>    <span class="c">brief, rubric, mark, feedback</span>
+│   └── Grades.md     <span class="c">the mark you need for each grade</span>
+├── <span class="d">3 Weeks/</span>          <span class="c">one note per week</span>
+└── <span class="d">Files/</span>            <span class="c">your files, feedback PDFs,
+                      transcripts, slide text</span></pre>
   </header>
 
-  <h2>What you get</h2>
-  <p class="muted">An assessment note, as easel writes it. The unit, the marks and the names below are made up.</p>
-
-  <article class="note" aria-label="Example assessment note">
-    <div class="bar"><span class="path">ABC123 Design Thinking / 2 Assessments / Assessment 1 - Case study workbook.md</span></div>
-    <div class="body">
-      <dl class="props">
-        <dt>easel</dt><dd>assessment</dd>
-        <dt>due</dt><dd>2026-08-29 23:59</dd>
-        <dt>points</dt><dd>50</dd>
-        <dt>status</dt><dd>marked</dd>
-        <dt>score</dt><dd>38</dd>
-        <dt>submitted</dt><dd>2026-08-28 21:40</dd>
-      </dl>
-
-      <h4>Assessment 1: Case study workbook</h4>
-      <p class="call">Due Sat 29 Aug 2026, 23:59 · 50 points · group: Assessments · submit as: online upload<br><a href="#install">View on Canvas</a></p>
-      <p class="call ok">Marked: <b>38 / 50</b> (76%) · grade Distinction (6) · marked 8 Sep 2026</p>
-
-      <h5>Brief</h5>
-      <p>Document the weekly design-thinking activities in a workbook. Reflect on what each method showed you and how you would use it in your own practice. Submit one PDF. APA 7th referencing.</p>
-
-      <h5>Rubric</h5>
-      <div class="scroll">
-      <table>
-        <thead><tr><th>Criterion</th><th class="n">Points</th><th>Your level</th><th class="n">Your points</th></tr></thead>
-        <tbody>
-          <tr><td>Engagement with the weekly activities</td><td class="n">20</td><td>Distinction</td><td class="n">16</td></tr>
-          <tr><td>Depth of reflection</td><td class="n">20</td><td>Credit</td><td class="n">14</td></tr>
-          <tr><td>Visual communication</td><td class="n">10</td><td>Distinction</td><td class="n">8</td></tr>
-          <tr><td><b>Total</b></td><td class="n"><b>50</b></td><td></td><td class="n"><b>38</b></td></tr>
-        </tbody>
-      </table>
+  <section id="install">
+    <div class="panel">
+      <div>
+        <h2>Install in Claude Code</h2>
+        <p>One click. Claude Code opens with the install line typed in. Press Enter and you are done.</p>
       </div>
-      <p class="muted" style="font-size:14px">Each criterion then lists every level with its descriptor, and marks the one you reached:</p>
-      <div class="scroll">
-      <table>
-        <thead><tr><th>Level</th><th class="n">Points</th><th>Depth of reflection</th></tr></thead>
-        <tbody>
-          <tr><td>High Distinction</td><td class="n">18.5</td><td>Nuanced synthesis of what each method showed you, with a thorough plan for your own practice.</td></tr>
-          <tr><td>Distinction</td><td class="n">16</td><td>Clear synthesis and a considered plan for your own practice.</td></tr>
-          <tr class="hit"><td>Credit</td><td class="n">14</td><td>Critical synthesis of the activities with a well-developed plan for your own practice.</td></tr>
-          <tr><td>Pass</td><td class="n">11.5</td><td>Useful synthesis with a relevant plan.</td></tr>
-        </tbody>
-      </table>
-      </div>
-
-      <h5>Your submission</h5>
-      <p><b>Submitted:</b> 2026-08-28 21:40 AEST (attempt 1)</p>
-      <ul><li><a href="#install">ABC123_A1_workbook.pdf</a></li></ul>
-
-      <h5>Feedback</h5>
-      <blockquote>
-        <p><b>Dr Lee Tutor</b> · 2026-09-08 12:54 AEST</p>
-        <p>Strong documentation and a professional layout. Parts of the reflection still read as a summary of the activity. Lead with why a method was useful, then what happened.</p>
-      </blockquote>
-      <p><b>Annotations on ABC123_A1_workbook.pdf</b> · <a href="#install">Marked-up PDF</a></p>
-      <ul>
-        <li>Page 2 · comment by Dr Lee Tutor: "Say why you liked this method. The reasoning is the mark."</li>
-        <li>Page 5 · highlight by Dr Lee Tutor: "the interview showed the users wanted fewer steps"</li>
-      </ul>
-
-      <h5>My notes</h5>
-      <div class="mine"><p>Lead with the reasoning in A2. Reuse the interview summary from week 4.</p></div>
-      <p class="caption">Everything under <b>My notes</b> is yours. easel keeps it on every update.</p>
-    </div>
-  </article>
-
-  <p class="caption">Each week gets a note like this too, and a Grades note shows your average on marked work and the mark you need for each grade. Lecture videos that Canvas hosts get a transcript file, and slides get a text file, so you can search them.</p>
-
-  <h2 id="install">Install in Claude Code</h2>
-  <div class="install">
-    <div class="primary">
-      <a class="btn" href="claude://code/new?q=Install%20easel%20from%20https%3A%2F%2Fgithub.com%2Fadamalshoomary%2Feasel.">Open in the Claude Code app</a>
-      <a class="btn second" href="claude-cli://open?q=Install%20easel%20from%20https%3A%2F%2Fgithub.com%2Fadamalshoomary%2Feasel.">Open Claude Code in a terminal</a>
-      <p class="hint">Claude Code opens with the install line typed in. Press Enter to install easel. If nothing opens, paste this line into Claude Code:</p>
-      <div class="copy">
-        <code id="line">Install easel from https://github.com/adamalshoomary/easel.</code>
-        <button id="copy" type="button">Copy</button>
+      <div>
+        <a class="big" href="claude://code/new?q=Install%20easel%20from%20https%3A%2F%2Fgithub.com%2Fadamalshoomary%2Feasel.">Open in the Claude Code app <span>→</span></a>
+        <a class="alt" href="claude-cli://open?q=Install%20easel%20from%20https%3A%2F%2Fgithub.com%2Fadamalshoomary%2Feasel.">or open Claude Code in a terminal</a>
+        <div class="copy">
+          <code id="line">Install easel from https://github.com/adamalshoomary/easel.</code>
+          <button id="copy" type="button">Copy</button>
+        </div>
       </div>
     </div>
-    <aside class="needs">
-      <h3>You need</h3>
-      <ul>
-        <li>Claude Code on a paid Claude plan</li>
-        <li>The <a href="https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn">Claude in Chrome</a> extension, signed in</li>
-        <li>Python 3.8 or newer</li>
-        <li>macOS, Windows or Linux</li>
-      </ul>
-    </aside>
-  </div>
+    <ul class="chips" aria-label="You need">
+      <li>Claude Code on a paid plan</li>
+      <li><a href="https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn">Claude in Chrome</a>, signed in</li>
+      <li>Python 3.8 or newer</li>
+      <li>macOS, Windows or Linux</li>
+    </ul>
+    <details>
+      <summary>Other ways to install</summary>
+      <p>macOS or Linux:</p>
+      <pre>curl -fsSL https://github.com/adamalshoomary/easel/releases/latest/download/install.sh | sh</pre>
+      <p>Windows, in PowerShell:</p>
+      <pre>irm https://github.com/adamalshoomary/easel/releases/latest/download/install.ps1 | iex</pre>
+      <p>With Node.js, on any system:</p>
+      <pre>npx skills add adamalshoomary/easel -g</pre>
+    </details>
+  </section>
 
-  <h2>Then run it</h2>
-  <p>Open a new Claude Code chat in your notes folder. Run this command with your own unit codes and Canvas address:</p>
-  <pre>/easel IFB201 IFB220 --canvas https://canvas.qut.edu.au</pre>
-  <p class="muted" style="margin-top:10px">Later runs need only the unit codes. On the first run, if Chrome shows a box about other apps and services on this device, click <b>Allow</b>. If Canvas shows its sign-in page, sign in.</p>
-
-  <h3>Each unit gets one folder</h3>
-  <pre class="tree">ABC123 Design Thinking/
-├── INDEX.md            next due date, every assessment, every week
-├── 1 Course Info/      staff, groups, announcements, Inbox
-├── 2 Assessments/      brief, rubric, your files, mark, feedback; Grades.md
-├── 3 Weeks/            one note per week
-└── Files/              attachments, submissions, feedback PDFs, transcripts, slide text</pre>
-
-  <h2>Other ways to install</h2>
-  <details>
-    <summary>One command in a terminal</summary>
-    <p>macOS or Linux:</p>
-    <pre>curl -fsSL https://github.com/adamalshoomary/easel/releases/latest/download/install.sh | sh</pre>
-    <p>Windows, in PowerShell:</p>
-    <pre>irm https://github.com/adamalshoomary/easel/releases/latest/download/install.ps1 | iex</pre>
-    <p>With Node.js, on any system:</p>
-    <pre>npx skills add adamalshoomary/easel -g</pre>
-  </details>
-
-  <h2>If something stops</h2>
-  <ul class="steps">
-    <li><b>Claude says a safety check stopped the browser step.</b> Open a new chat in your notes folder and run the same command again.</li>
-    <li><b>Chrome is not connected.</b> In Claude Code, type <code>/chrome</code> and choose <b>Enabled by default</b>, then run the command again.</li>
-    <li><b>Canvas asks you to sign in.</b> Sign in in the Chrome tab easel opened. easel carries on when you are in.</li>
-    <li><b>A read failed.</b> The summary says INCOMPLETE and names the part. Your notes keep the last good copy. Run easel again later.</li>
-  </ul>
-
-  <h2>Privacy</h2>
-  <ul class="steps">
-    <li>easel runs on your computer. Canvas data goes from your Chrome tab to your notes folder.</li>
-    <li>easel only reads Canvas. When it opens a feedback file, Canvas marks the feedback as seen.</li>
-    <li>Claude sees the folder paths, the Canvas tab address and each run's summary, which can name assessments, new marks and your average on marked work.</li>
-    <li>easel never changes, moves or deletes a file it did not create. Notes you edit stay as you left them.</li>
-  </ul>
+  <section class="run">
+    <h2>Then run it</h2>
+    <p>Open a new Claude Code chat in your notes folder. Type your unit codes and your Canvas address.</p>
+    <div class="term" aria-label="Example command">
+      <div class="bar"><i></i><i></i><i></i></div>
+      <pre><span class="pr">❯</span><span class="cmd">/easel IFB201 IFB220 --canvas https://canvas.qut.edu.au</span></pre>
+    </div>
+    <div class="three">
+      <div><b>Later runs</b><span>Type the unit codes only. The Canvas address and the folder are kept from the first run.</span></div>
+      <div><b>First run</b><span>If Chrome asks about other apps and services on this device, click <b style="display:inline;font-size:inherit;margin:0">Allow</b>. If Canvas shows its sign-in page, sign in.</span></div>
+      <div><b>If a safety check stops it</b><span>Run the same command again in a new chat.</span></div>
+    </div>
+  </section>
 
   <footer>
-    <p><a href="https://github.com/adamalshoomary/easel">easel on GitHub</a> · MIT licence · The example note above is made up. The folder tree and the summary lines come from easel 4.5.0.</p>
+    <p><a href="https://github.com/adamalshoomary/easel">easel on GitHub</a>, with privacy notes and limits · MIT licence</p>
   </footer>
 </main>
 <script>
