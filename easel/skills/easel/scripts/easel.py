@@ -38,7 +38,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "4.3.0"
+VERSION = "4.4.0"
 REPO = "adamalshoomary/easel"
 # Updates come from the latest published release. EASEL_FROM points at another copy of the release files, for tests.
 RELEASE = (os.environ.get("EASEL_FROM") or "https://github.com/" + REPO + "/releases/latest/download").rstrip("/") + "/"
@@ -70,6 +70,14 @@ MY_NOTES_HINT = "<!-- easel keeps everything under this heading when it updates 
 OWNED_FM = {"easel", "unit", "week", "kind", "canvas", "due", "points", "status", "score", "grade", "submitted",
             "graded", "weight", "group", "updated", "sections", "term", "estimate", "band", "source_folder", "pages", "scraped"}
 WIN_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+# Services that Canvas embeds or links to. The key is part of the host name. An unknown host shows as itself.
+SERVICES = [("echo360", "Echo360"), ("h5p", "H5P"), ("padlet", "Padlet"), ("miro", "Miro"), ("youtube", "YouTube"), ("youtu.be", "YouTube"),
+            ("vimeo", "Vimeo"), ("zoom", "Zoom"), ("instructuremedia", "Canvas Studio"), ("panopto", "Panopto"), ("kaltura", "Kaltura"),
+            ("turnitin", "Turnitin"), ("gradescope", "Gradescope"), ("feedbackfruits", "FeedbackFruits"), ("cogniti", "Cogniti"), ("mediahub", "MediaHub"), ("clickview", "ClickView"),
+            ("m365.cloud.microsoft", "Microsoft 365"), ("forms.cloud.microsoft", "Microsoft Forms"), ("forms.office.com", "Microsoft Forms"),
+            ("teams.microsoft.com", "Microsoft Teams"), ("sharepoint.com", "SharePoint"), ("onedrive", "OneDrive"), ("docs.google.com", "Google Docs"),
+            ("drive.google.com", "Google Drive"), ("github.com", "GitHub"), ("linkedin.com", "LinkedIn"), ("wikipedia.org", "Wikipedia")]
+OUTCOMES = ["copied", "transcript", "file", "link", "refused", "unsupported", "skipped"]
 
 
 # ---------------------------------------------------------------- small helpers
@@ -397,6 +405,8 @@ class Unit:
         self.feedback_asg = set()
         self.viewer_keys = []
         self.result = {}
+        self.ledger = None
+        self.coverage_line = ""
 
     def cfg(self):
         return {"unit": self.code, "course_id": self.old.get("course_id")}
@@ -565,6 +575,10 @@ class Planner:
         self.scheme = scheme_of(bundle)
         self.asg_note = {}
         self.tplan = {}
+        self.xplan = {}
+        self.tools = bundle.get("tools") or {}
+        self.disc_note = {}
+        self.quiz_items = {}
 
     # ---- existing notes on disk
     def existing_notes(self):
@@ -684,7 +698,44 @@ class Planner:
         meta = ("**Quiz:** " + "  |  ".join(bits)) if bits else ""
         link = f"\n\n[Open the assessment note](NOTE:asg:{q['assignment_id']})" if q.get("assignment_id") in self.asg else ""
         body = self.locked(it) or demote(it.get("body_md") or "")
-        return f"## {self.title_h2(it['title'])}\n*[View on Canvas]({it['html_url']})*\n\n{meta}{link}\n\n{body}".rstrip()
+        att = "" if q.get("assignment_id") in self.asg else self.attempts_md(it, level="###")
+        return f"## {self.title_h2(it['title'])}\n*[View on Canvas]({it['html_url']})*\n\n{meta}{link}\n\n{body}".rstrip() + (f"\n\n{att}" if att else "")
+
+    def attempts_md(self, it, level="##"):
+        """The student's own attempts at a classic quiz: score, each question, and whether the answer was right."""
+        x = it.get("attempts") or {}
+        q = it.get("quiz") or {}
+        if not x:
+            return ""
+        if x.get("status") not in (None, 200):
+            return f"{level} Your attempts\n\n*Canvas did not let easel read your attempts (HTTP {x['status']}).*"
+        atts = x.get("attempts") or []
+        if not atts:
+            return ""
+        survey = "survey" in (q.get("quiz_type") or "")
+        out = [f"{level} Your attempts"]
+        for a in atts:
+            head = f"**Attempt {a.get('attempt') or 1}**"
+            if a.get("score") is not None and not survey:
+                head += f" · {pts(a['score'])} / {pts(a.get('points_possible') or q.get('points_possible'))}"
+            if a.get("finished_at"):
+                head += f" · {fmt_dt(a['finished_at'])}"
+            out.append(head)
+            qs = a.get("questions") or []
+            if not qs:
+                out.append("*Canvas does not show the questions of this attempt.*" if a.get("questions_status") not in (None, 200) else "*No questions returned.*")
+                continue
+            lines = []
+            for i, qq in enumerate(qs, 1):
+                txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", qq.get("text_md") or "")).strip() or (qq.get("name") or f"Question {i}")
+                mark = "" if survey or qq.get("correct") is None else (" ✓" if qq.get("correct") is True else " ◐ partly right" if qq.get("correct") == "partial" else " ✗")
+                lines.append(f"{i}. {txt}{mark}")
+                if qq.get("answers"):
+                    lines.append("   Options: " + "; ".join(cell(o) for o in qq["answers"][:12]))
+            out.append("\n".join(lines))
+        if not survey:
+            out.append("*✓ right, ✗ wrong. Canvas shows easel whether each answer was right, and the options. It does not show which option you picked.*")
+        return "\n\n".join(out)
 
     def sec_discussion(self, it):
         head = []
@@ -717,7 +768,8 @@ class Planner:
             u = (it.get("external_url") or "").replace(" ", "%20").replace("(", "%28").replace(")", "%29")
             return f"## {self.title_h2(it['title'])}\n\n[{it['title']}]({u})"
         if t == "ExternalTool":
-            return f"## {self.title_h2(it['title'])}\n*[Open on Canvas]({it['html_url']})* (external tool)"
+            name = service_name(it.get("external_url") or it.get("html_url"), self.tools)
+            return f"## {self.title_h2(it['title'])}\n*[Open on Canvas]({it['html_url']})* ({name})"
         return f"## {self.title_h2(it['title'])}\n*[View on Canvas]({it.get('html_url', '')})*"
 
     # ---- one assessment note
@@ -835,8 +887,12 @@ class Planner:
             p = a.get("points_possible")
             frac = (s["score"] / p) if isinstance(p, (int, float)) and p else None
             grade = f" · grade {s['grade']}" if s.get("grade") not in (None, "", str(s.get("score")), pts(s.get("score"))) else ""
+            st = a.get("score_statistics") or {}
+            stat = ""
+            if isinstance(st.get("mean"), (int, float)) and isinstance(p, (int, float)) and p:
+                stat = f"\n> Class: mean {pts(st['mean'])}" + (f", from {pts(st['min'])} to {pts(st['max'])}" if st.get("min") is not None and st.get("max") is not None else "") + f" out of {pts(p)}"
             head.append(f"> [!success] Marked: **{pts(s['score'])} / {pts(p)}**" + (f" ({pct(frac)})" if frac is not None else "") + grade +
-                        (f" · marked {fmt_date(s.get('graded_at'))}" if s.get("graded_at") else ""))
+                        (f" · marked {fmt_date(s.get('graded_at'))}" if s.get("graded_at") else "") + stat)
         elif code == "submitted":
             head.append(f"> [!info] Submitted {fmt_day(s.get('submitted_at'))}" + (" · late" if s.get("late") else "") + " · not marked yet")
         elif code in ("missing", "overdue"):
@@ -848,7 +904,16 @@ class Planner:
         secs = ["\n\n".join(head)]
         lock = f"*Locked on Canvas: {re.sub(r'<[^>]+>', '', a['lock_explanation'])}*" if a.get("locked") and a.get("lock_explanation") else ""
         body = demote(a.get("description_md") or "").strip()
+        if a.get("is_quiz_lti"):
+            body = ("*New Quiz: Canvas does not let students read the questions or answers through its API. Open it on Canvas.*" + ("\n\n" + body if body else ""))
         secs.append("## Brief\n\n" + (lock + ("\n\n" if lock and body else "") + body if (lock or body) else "*No description on Canvas.*"))
+        if a.get("discussion_id") in self.disc_note:
+            secs.append(f"## Discussion\n\n[Read the thread and replies](NOTE:{self.disc_note[a['discussion_id']]})")
+        qi = self.quiz_items.get(a["id"])
+        if qi:
+            att = self.attempts_md(qi)
+            if att:
+                secs.append(att)
         rub = self.rubric_md(a)
         if rub:
             secs.append(rub)
@@ -924,6 +989,10 @@ class Planner:
                     secs.append(("sec", self.sec_item(it)))
                     outline.append(it["title"].strip())
                     count += 1
+                    if it["type"] == "Discussion" and it.get("content_id"):
+                        self.disc_note[it["content_id"]] = g["key"]
+                    if it["type"] == "Quiz" and (it.get("quiz") or {}).get("assignment_id"):
+                        self.quiz_items[it["quiz"]["assignment_id"]] = it
             if len(outline) >= 4:
                 lead = "In this week" if g["kind"] == "week" else "In this module"
                 secs.insert(0, ("lead", f"> [!abstract] {lead}\n" + "\n".join(f"> - {cell(x)}" for x in outline)))
@@ -948,13 +1017,24 @@ class Planner:
             ci.append("## Teaching staff\n\nNames and roles from Canvas. Canvas does not show staff emails to students; "
                       "look for them on the unit's own pages.\n\n" + "\n".join(rows))
         elif c.get("teachers"):
-            ci.append("## Teaching staff\n\n" + ", ".join(c["teachers"]))
+            why = (b.get("api_status") or {}).get("staff")
+            ci.append("## Teaching staff\n\n" + ", ".join(c["teachers"]) +
+                      (f"\n\nCanvas refused the staff list (HTTP {why}), so these are the names on the course record." if why not in (None, 200) else ""))
         if b.get("groups"):
             ci.append("## Your groups\n\n" + "\n".join(f"- **{cell(g['name'])}**: " + (", ".join(g.get('members') or []) or "no members listed")
                                                      for g in b["groups"]))
         tools = [t for t in c.get("tabs") or [] if isinstance(t, dict) and t.get("type") == "external" and t.get("html_url")]
         if tools:
             ci.append("## Canvas tools\n\n" + " · ".join(f"[{t['label']}]({t['html_url']})" for t in tools))
+        evs = sorted((e for e in b.get("events") or [] if e.get("start_at")), key=lambda e: e.get("start_at") or "")
+        if evs:
+            rows = []
+            for e in evs:
+                when = fmt_day(e["start_at"]) if e.get("all_day") else fmt_dt(e.get("start_at"))
+                where = f" · {cell(e['location'])}" if e.get("location") else ""
+                desc = re.sub(r"\s+", " ", e.get("description_md") or "").strip()
+                rows.append(f"- **{when}** [{cell(e.get('title') or 'Event')}]({e.get('html_url') or ORIGIN}){where}" + (f": {desc[:200]}" if desc else ""))
+            ci.append(f"## Dates\n*[Calendar on Canvas]({ORIGIN}/calendar?include_contexts=course_{self.cid})*\n\nEvents from the unit's Canvas calendar. Assessment due dates are in the Grades note.\n\n" + "\n".join(rows))
         syl = b.get("syllabus_md") or ""
         if syl.strip():
             ci.append(f"## Syllabus\n*[View on Canvas]({ORIGIN}/courses/{self.cid}/assignments/syllabus)*\n\n{demote(syl)}".rstrip())
@@ -989,6 +1069,8 @@ class Planner:
                          [self.sec_page(p) + ("\n\n*This is the course home page.*" if p.get("front_page") else "") for p in xp])
         xd = sorted(b.get("extra_discussions") or [], key=lambda d: d.get("posted_at") or "")
         if xd:
+            for d in xd:
+                self.disc_note[d["id"]] = "other_discussions"
             self.special("other_discussions", "1 Course Info", "Discussions not in any module", [self.sec_discussion(d) for d in xd])
         xf = [f for f in (b.get("extra_files") or []) if f in b.get("files", {})]
         if xf:
@@ -1295,7 +1377,7 @@ class Planner:
         claimed = set()
         for note in self.notes:
             text = "\n".join(s for _, s in note["secs"] if s)
-            for kind, mid in TRANSCRIPT_RE.findall(text):
+            for _, kind, mid in TRANSCRIPT_RE.findall(text):
                 key = f"{kind}:{mid}"
                 if key in self.tplan:
                     continue
@@ -1304,7 +1386,7 @@ class Planner:
                 track = choose_track(m.get("tracks"), locale)
                 doc = transcript_doc(self.u, key, m, track, title) if track else None
                 if not doc:
-                    self.tplan[key] = {"missing": True, "title": title, "status": m.get("status")}
+                    self.tplan[key] = {"missing": True, "title": title, "status": m.get("status"), "note": note["title"]}
                     continue
                 fm, body, n, duration = doc
                 folder = self.T / "Files" / self.note_folder(note) / "Transcripts"
@@ -1312,7 +1394,7 @@ class Planner:
                 if str(path).lower() in claimed:
                     path = folder / (clean_file_name(title) + f"-{mid}.md")
                 claimed.add(str(path).lower())
-                self.tplan[key] = {"path": path, "fm": fm, "text": body, "words": n, "duration_text": fmt_duration(duration), "title": title}
+                self.tplan[key] = {"path": path, "fm": fm, "text": body, "words": n, "duration_text": fmt_duration(duration), "title": title, "note": note["title"]}
         return self
 
     # ---- annotated feedback: which submission files to open in the document viewer
@@ -1365,7 +1447,7 @@ def clean_file_name(name):
 # ---------------------------------------------------------------- transcripts
 # Canvas keeps a subtitle track for many of the videos it hosts. The browser script puts each track in the
 # bundle under "media". The helper turns the track into paragraphs with a time at the start of each one.
-TRANSCRIPT_RE = re.compile(r"^TRANSCRIPT:(att|obj):([\w-]+)$", re.M)
+TRANSCRIPT_RE = re.compile(r"^([ \t]*)TRANSCRIPT:(att|obj):([\w-]+)$", re.M)
 CUE_TIME_RE = re.compile(r"(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?")
 MEDIA_EXT = re.compile(r"\.(mp4|m4v|m4a|mp3|mov|webm|wav|ogg|avi|wmv|mkv|aac|flac)$", re.I)
 
@@ -1506,6 +1588,172 @@ def transcript_doc(unit, key, m, track, title):
 
 
 # ---------------------------------------------------------------- writing
+# ---------------------------------------------------------------- text of PowerPoint and Word files
+import xml.etree.ElementTree as ET
+
+NS = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main", "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+      "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+      "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+TEXT_EXT = {".pptx": "slides", ".docx": "document"}
+
+
+def _rels(z, path):
+    """Relationship id -> target, for one part of an Office file."""
+    try:
+        root = ET.fromstring(z.read(path))
+    except (KeyError, ET.ParseError):
+        return {}
+    return {r.get("Id"): r.get("Target") for r in root.findall("rel:Relationship", NS)}
+
+
+def _paras(node, tag):
+    """The paragraphs of one shape or body: text runs joined, one string per paragraph. A line break inside a paragraph starts a new line."""
+    out = []
+    t_tag, br_tag = f"{{{NS[tag]}}}t", f"{{{NS[tag]}}}br"
+    for para in node.iter(f"{{{NS[tag]}}}p"):
+        bits = []
+        for x in para.iter():
+            if x.tag == t_tag:
+                bits.append(x.text or "")
+            elif x.tag == br_tag:
+                bits.append("\n")
+        t = "\n".join(re.sub(r"[ \t]+", " ", ln).strip() for ln in "".join(bits).split("\n"))
+        t = re.sub(r"\n{2,}", "\n", t).strip()
+        if t and not re.fullmatch(r"\d{1,3}", t):     # a bare number is the slide number in the footer
+            out.append(t)
+    return out
+
+
+def pptx_text(path: Path):
+    """Markdown for a PowerPoint deck: one heading per slide, the slide's text, then its speaker notes."""
+    with zipfile.ZipFile(path) as z:
+        pres = ET.fromstring(z.read("ppt/presentation.xml"))
+        rels = _rels(z, "ppt/_rels/presentation.xml.rels")
+        order = []
+        for sld in pres.iter(f"{{{NS['p']}}}sldId"):
+            tgt = rels.get(sld.get(f"{{{NS['r']}}}id"))
+            if tgt:
+                order.append("ppt/" + tgt.lstrip("/").replace("ppt/", "", 1) if not tgt.startswith("/") else tgt.lstrip("/"))
+        if not order:
+            order = sorted((n for n in z.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", n)), key=lambda n: int(re.findall(r"\d+", n)[-1]))
+        parts, words_n = [], 0
+        for i, name in enumerate(order, 1):
+            try:
+                slide = ET.fromstring(z.read(name))
+            except (KeyError, ET.ParseError):
+                parts.append(f"## Slide {i}\n\n*Unreadable slide.*")
+                continue
+            body = []
+            for sp in slide.iter(f"{{{NS['p']}}}sp"):
+                ps = _paras(sp, "a")
+                if ps:
+                    body.append("\n".join(ps))
+            for tbl in slide.iter(f"{{{NS['a']}}}tbl"):
+                for tr in tbl.findall("a:tr", NS):
+                    cells = [" ".join(_paras(tc, "a")) for tc in tr.findall("a:tc", NS)]
+                    body.append("| " + " | ".join(cell(c) for c in cells) + " |")
+            title = body[0].split("\n")[0] if body else ""
+            head = f"## Slide {i}" + (f": {title[:80]}" if title and len(title) <= 120 else "")
+            rest = body[1:] if body and title == body[0] else body
+            notes = []
+            srels = _rels(z, re.sub(r"slides/(slide\d+\.xml)$", r"slides/_rels/\1.rels", name))
+            for tgt in srels.values():
+                if "notesSlide" in tgt:
+                    npath = "ppt/notesSlides/" + tgt.split("/")[-1]
+                    try:
+                        notes = _paras(ET.fromstring(z.read(npath)), "a")
+                    except (KeyError, ET.ParseError):
+                        notes = []
+            text = "\n\n".join(rest)
+            if notes:
+                text += ("\n\n" if text else "") + "**Speaker notes**\n\n" + "\n\n".join(notes)
+            parts.append(head + ("\n\n" + text if text else ""))
+            words_n += words(text) + words(title)
+        return "\n\n".join(parts) + "\n", len(order), words_n
+
+
+def docx_text(path: Path):
+    """Markdown for a Word file: headings, paragraphs and tables, in order."""
+    with zipfile.ZipFile(path) as z:
+        doc = ET.fromstring(z.read("word/document.xml"))
+    body = doc.find("w:body", NS)
+    out = []
+
+    def para_md(para):
+        t = "".join(x.text or "" for x in para.iter(f"{{{NS['w']}}}t"))
+        t = re.sub(r"[ \t]+", " ", t).strip()
+        if not t:
+            return ""
+        st = para.find("w:pPr/w:pStyle", NS)
+        sv = (st.get(f"{{{NS['w']}}}val") or "") if st is not None else ""
+        m = re.match(r"(?:Heading|Title)(\d?)", sv, re.I)
+        if m:
+            lvl = min(int(m.group(1) or 1), 4)
+            return "#" * (lvl + 1) + " " + t
+        if para.find("w:pPr/w:numPr", NS) is not None:
+            return "- " + t
+        return t
+
+    for el in list(body) if body is not None else []:
+        tag = el.tag.split("}")[-1]
+        if tag == "p":
+            t = para_md(el)
+            if t:
+                out.append(t)
+        elif tag == "tbl":
+            rows = []
+            for tr in el.findall("w:tr", NS):
+                cells = [" ".join(para_md(p_).lstrip("#- ").strip() for p_ in tc.findall("w:p", NS)).strip() for tc in tr.findall("w:tc", NS)]
+                rows.append("| " + " | ".join(cell(c) for c in cells) + " |")
+            if rows:
+                rows.insert(1, "| " + " | ".join("---" for _ in rows[0].split(" | ")) + " |")
+                out.append("\n".join(rows))
+    text = "\n\n".join(out) + "\n"
+    return text, 0, words(text)
+
+
+def file_text_doc(unit, fid, meta, src: Path, kind):
+    """Frontmatter and body for the text file of one deck or document."""
+    text, n_slides, n_words = (pptx_text if kind == "slides" else docx_text)(src)
+    fm = {"easel": kind, "unit": unit.code, "file": meta.get("display_name") or src.name, "canvas": f"{ORIGIN}/courses/{unit.bundle['course']['id']}/files/{fid}",
+          **({"slides": n_slides} if kind == "slides" else {}), "words": n_words}
+    return fm, text, n_slides, n_words
+
+
+def plan_texts(unit, P):
+    """After the files are on disk: read each PowerPoint and Word course file and plan its text file."""
+    files = unit.bundle.get("files") or {}
+    claimed = set()
+    for fid, p in P.fplan.items():
+        if p.get("action") not in ("reuse", "download") or not p.get("path"):
+            continue
+        if p["action"] == "download" and fid not in unit.received:
+            continue
+        meta = files.get(fid) or {}
+        if meta.get("role") in ("submission", "feedback", "inbox"):
+            continue
+        src = Path(p["path"])
+        kind = TEXT_EXT.get(src.suffix.lower())
+        if not kind or not src.exists():
+            continue
+        note = P.file_refs.get(fid)
+        folder = src.parent / ("Slides text" if kind == "slides" else "Document text")
+        path = folder / (src.stem + ".md")
+        if str(path).lower() in claimed:
+            path = folder / f"{src.stem}-{fid}.md"
+        claimed.add(str(path).lower())
+        try:
+            fm, text, n_slides, n_words = file_text_doc(unit, fid, meta, src, kind)
+        except Exception as e:                        # a damaged or encrypted file: say so, keep the file itself
+            P.xplan[fid] = {"missing": True, "title": src.name, "error": f"{type(e).__name__}: {str(e)[:80]}", "kind": kind, "note": note["title"] if note else "Course files"}
+            continue
+        if not text.strip():
+            P.xplan[fid] = {"missing": True, "title": src.name, "error": "no text in the file", "kind": kind, "note": note["title"] if note else "Course files"}
+            continue
+        P.xplan[fid] = {"path": path, "fm": fm, "text": text, "words": n_words, "slides": n_slides, "title": src.name, "kind": kind,
+                        "note": note["title"] if note else "Course files"}
+
+
 def resolve_links(text, note_dir: Path, planner: Planner, received):
     files = planner.b.get("files") or {}
     T = planner.T
@@ -1518,7 +1766,12 @@ def resolve_links(text, note_dir: Path, planner: Planner, received):
         label = label.replace("[", "(").replace("]", ")").replace("\n", " ")
         ok = p.get("action") == "reuse" or (p.get("action") == "download" and fid in received)
         if ok:
-            return f"[{label}]({link_path(note_dir, Path(p['path']))})"
+            x = planner.xplan.get(fid) or {}
+            extra = ""
+            if x and not x.get("missing"):
+                what = "slide text" if x.get("kind") == "slides" else "text"
+                extra = f" · [{what}]({link_path(note_dir, Path(x['path']))})"
+            return f"[{label}]({link_path(note_dir, Path(p['path']))}){extra}"
         return f"[{label}]({ORIGIN}/courses/{planner.cid}/files/{fid})"
 
     def rep_note(m):
@@ -1532,11 +1785,12 @@ def resolve_links(text, note_dir: Path, planner: Planner, received):
         label, rel = m.group(1), urllib.parse.unquote(m.group(2))
         return f"[{label}]({link_path(note_dir, T / rel)})"
     def rep_transcript(m):
-        p = planner.tplan.get(f"{m.group(1)}:{m.group(2)}")
+        p = planner.tplan.get(f"{m.group(2)}:{m.group(3)}")
         if not p or p.get("missing"):
             return ""
         label = p["title"].replace("[", "(").replace("]", ")")
-        return f"Transcript: [{label}]({link_path(note_dir, Path(p['path']))}) · {p['words']:,} words · {p['duration_text']}"
+        return f"{m.group(1)}Transcript: [{label}]({link_path(note_dir, Path(p['path']))}) · {p['words']:,} words · {p['duration_text']}"
+    text = name_links(text, planner.tools)
     text = re.sub(r"\[((?:[^\]\\]|\\.)*)\]\(FILE:(\d+)\)", rep_file, text)
     text = re.sub(r"\[([^\]]*)\]\(NOTE:([^)]+)\)", rep_note, text)
     text = re.sub(r"\[([^\]]*)\]\(PATH:([^)]+)\)", rep_path, text)
@@ -1800,6 +2054,7 @@ def finalize(unit: Unit, phase="main"):
                 dest = dest.with_name(f"{st}-{fid}{ext}")
                 p["path"] = dest
             shutil.move(str(src), lp(dest))
+        plan_texts(unit, P)
     old_notes = {x.get("path"): x for x in unit.old.get("notes", [])}
     targets = P.notes if phase == "main" else [n for n in P.notes if n.get("asg_id") in unit.feedback_asg]
     for n in targets:
@@ -1819,7 +2074,8 @@ def finalize(unit: Unit, phase="main"):
         elif st in ("written", "new") and phase == "main":
             res["written" if st == "written" else "new"].append(n["path"].name)
     if phase == "main":
-        write_transcripts(unit, P)
+        write_generated(unit, P, P.tplan, "transcripts")
+        write_generated(unit, P, P.xplan, "texts")
         # v3 notes that v4 replaces, such as "Assignments.md", go away when nobody edited them. The backup holds them.
         for e in P.stale:
             prev = old_notes.get(e["path"].relative_to(T).as_posix())
@@ -1849,10 +2105,15 @@ def finalize(unit: Unit, phase="main"):
         "feedback": P.feedback,
         "transcripts": [{"key": k, "path": Path(p["path"]).relative_to(T).as_posix(), "sha": p["sha"], "words": p["words"]}
                         for k, p in P.tplan.items() if not p.get("missing") and p.get("sha")],
+        "texts": [{"key": k, "path": Path(p["path"]).relative_to(T).as_posix(), "sha": p["sha"], "words": p["words"]}
+                  for k, p in P.xplan.items() if not p.get("missing") and p.get("sha")],
     }
     write_text(T / ".easel" / "manifest.json", json.dumps(manifest, indent=1, ensure_ascii=False))
     if phase == "main" and (T / ".canvas-manifest.json").exists() and res.get("backup"):
         (T / ".canvas-manifest.json").unlink()
+    unit.ledger = build_ledger(unit, P)
+    unit.coverage_line = coverage_line(unit, unit.ledger)
+    write_coverage(unit, P, unit.ledger, unit.coverage_line)
     unit.timing["build_s"] = round(time.time() - t0, 1)
     unit.report = full_report(unit, changes)
     write_text(T / ".easel" / "report.txt", unit.report + "\n")
@@ -1860,12 +2121,13 @@ def finalize(unit: Unit, phase="main"):
     unit.done = True
 
 
-def write_transcripts(unit, P):
-    """Write one transcript file per video. A file the student changed stays as they left it."""
+def write_generated(unit, P, plan, what):
+    """Write one generated file per plan entry: transcripts of videos, text of decks and documents.
+    A file the student changed stays as they left it."""
     res = unit.result
-    tr = res.setdefault("transcripts", {"new": [], "written": [], "unchanged": 0, "edited": [], "missing": []})
-    old = {x.get("key"): x for x in unit.old.get("transcripts", [])}
-    for key, p in P.tplan.items():
+    tr = res.setdefault(what, {"new": [], "written": [], "unchanged": 0, "edited": [], "missing": []})
+    old = {x.get("key"): x for x in unit.old.get(what, [])}
+    for key, p in plan.items():
         if p.get("missing"):
             tr["missing"].append(p["title"])
             continue
@@ -1890,6 +2152,294 @@ def write_transcripts(unit, P):
         write_text(path, text)
         p["sha"] = sha(text)
         tr["new" if cur is None else "written"].append(path.name)
+
+
+def service_name(url, tools=None):
+    """The service behind a link: the host table above, or the host itself.
+    A Canvas tool link names its tool through the launch host that the browser script read (`tools`)."""
+    try:
+        u = urllib.parse.urlparse(url or "")
+        if "external_tools" in u.path:
+            inner = urllib.parse.parse_qs(u.query).get("url")
+            if inner:
+                return service_name(inner[0])
+            t = (tools or {}).get(url) or {}
+            if t.get("host"):
+                return service_name("https://" + t["host"])
+            return "Canvas tool"
+        host = (u.hostname or "").lower()
+    except ValueError:
+        return "unknown"
+    if not host:
+        return "unknown"
+    for key, name in SERVICES:
+        if key in host:
+            return name
+    return re.sub(r"^www\.", "", host)
+
+
+KNOWN_SERVICES = {name for _, name in SERVICES}
+GENERIC_LABEL = re.compile(r"^(Embedded (iframe|video|audio|embed)|Video on Canvas|Open on Canvas)$", re.I)
+
+
+def name_links(text, tools):
+    """Put the service name into links that leave Canvas or open a Canvas tool: `[Lecture 3 (Echo360)](...)`."""
+    def rep(m):
+        label, url = m.group(1), m.group(2)
+        if "external_tools" not in url and not any(k in url.lower() for k, _ in SERVICES):
+            return m.group(0)
+        name = service_name(url, tools)
+        if name not in KNOWN_SERVICES or name.lower() in label.lower():
+            return m.group(0)
+        if GENERIC_LABEL.match(label.strip()):
+            return f"[{name}]({url})"
+        return f"[{label} ({name})]({url})"
+    return re.sub(r"\[([^\]\n]*)\]\((https?://[^)\s]+)\)", rep, text)
+
+
+def build_ledger(unit, P):
+    """One row for every object Canvas showed easel and what became of it. Rule 3 of the extraction model."""
+    b, T = unit.bundle, unit.target
+    files = b.get("files") or {}
+    refs = b.get("refs") or {}
+    rows, done_media, done_refs = [], set(), set()
+
+    def row(kind, title, found_in, outcome, detail=""):
+        rows.append({"kind": kind, "title": (title or "").strip() or "(untitled)", "found_in": found_in, "outcome": outcome, "detail": detail})
+
+    def item_outcome(it):
+        if it.get("locked") or it.get("status") not in (None, 200):
+            exp = it.get("lock_explanation")
+            if it.get("status") not in (None, 200):
+                return "refused", f"HTTP {it['status']}"
+            return "refused", "locked: " + re.sub(r"<[^>]+>", "", str(exp or "")).strip()[:80] if exp else "locked on Canvas"
+        return "copied", ""
+
+    def embedded(url, found_in):
+        """Images, services and links inside one piece of Canvas text."""
+        for r in refs.get(url) or []:
+            kind, rid = r.get("kind"), r.get("id")
+            key = (kind, rid, found_in)   # one row per object per note; the same banner on ten pages of one note is one row
+            if kind in ("file",) or key in done_refs:
+                continue          # files have their own rows below
+            done_refs.add(key)
+            if kind == "media":
+                done_media.add(rid)
+                tp = P.tplan.get(rid) or {}
+                if tp.get("missing"):
+                    if tp.get("status") not in (None, 200):
+                        row("media", tp.get("title") or r.get("title"), found_in, "refused", f"HTTP {tp['status']} on the subtitle track")
+                    else:
+                        row("media", tp.get("title") or r.get("title"), found_in, "unsupported", "no transcript on Canvas")
+                elif tp:
+                    row("media", tp["title"], found_in, "transcript", f"{tp['words']:,} words")
+                else:
+                    row("media", r.get("title"), found_in, "unsupported", "video not asked for")
+            elif kind == "image":
+                what = r.get("image") or "alt text"
+                if what == "equation":
+                    row("image", r.get("title") or "equation", found_in, "copied", "equation, kept as LaTeX")
+                else:
+                    row("image", r.get("title") or "(no alt text)", found_in, "skipped",
+                        ("decorative, " if what == "decorative" else "no alt text, " if what == "no alt text" else "") + "images stay on Canvas")
+            elif kind == "lti":
+                row("lti", r.get("title"), found_in, "link", service_name(rid, P.tools))
+            elif kind == "external":
+                row("external", r.get("title"), found_in, "link", service_name(rid))
+
+    cid = P.cid
+    for n in P.notes:
+        title = n["title"]
+        if n["kind"] in ("week", "module"):
+            for m in b.get("modules") or []:
+                if m["id"] not in n["module_ids"]:
+                    continue
+                for it in m["items"]:
+                    t = it["type"]
+                    if t == "SubHeader":
+                        continue
+                    if t == "Page":
+                        url = f"{ORIGIN}/courses/{cid}/pages/{it.get('page_url')}"
+                        oc, d = item_outcome(it)
+                        row("page", it["title"], title, oc, d)
+                        embedded(url, title)
+                    elif t == "Assignment":
+                        a = P.asg.get(it.get("assignment_id") or it.get("content_id"))
+                        if a:
+                            row("assignment", it["title"], title, "copied", "assessment note")
+                        else:
+                            row("assignment", it["title"], title, "refused", f"HTTP {it.get('status') or '?'}")
+                    elif t == "Quiz":
+                        oc, d = item_outcome(it)
+                        if oc == "copied":
+                            x = it.get("attempts") or {}
+                            n_att = len(x.get("attempts") or [])
+                            d = f"description, settings and {n_att} attempt{'s' if n_att != 1 else ''}" if x.get("status") in (None, 200) else f"description and settings; attempts refused: HTTP {x['status']}"
+                        row("quiz", it["title"], title, oc, d)
+                        embedded(it.get("html_url"), title)
+                    elif t == "Discussion":
+                        oc, d = item_outcome(it)
+                        rp = it.get("replies") or {}
+                        if oc == "copied" and rp.get("status") not in (None, 200):
+                            d = f"replies refused: HTTP {rp['status']}"
+                        row("discussion", it["title"], title, oc, d)
+                        embedded(it.get("html_url"), title)
+                        embedded(f"{ORIGIN}/courses/{cid}/discussion_topics/{it.get('content_id')}", title)
+                    elif t == "File":
+                        pass      # files have their own rows below
+                    elif t == "ExternalUrl":
+                        row("external", it["title"], title, "link", service_name(it.get("external_url")))
+                    elif t == "ExternalTool":
+                        row("lti", it["title"], title, "link", service_name(it.get("external_url") or it.get("html_url"), P.tools))
+                    else:
+                        row(t.lower(), it["title"], title, "unsupported", f"module item type {t}")
+        elif n["kind"] == "assessment":
+            a = P.asg.get(n["asg_id"])
+            if a:
+                s = a.get("submission") or {}
+                bits = ["brief"]
+                if a.get("rubric"):
+                    bits.append("rubric")
+                if s.get("score") is not None:
+                    bits.append("mark")
+                if s.get("comments"):
+                    bits.append("comments")
+                if a.get("is_quiz_lti"):
+                    bits.append("New Quiz: questions are not available to students")
+                row("assignment", a["name"], title, "copied", ", ".join(bits))
+                embedded(a.get("html_url"), title)
+        elif n["key"] == "announcements":
+            for a in b.get("announcements") or []:
+                row("announcement", a["title"], title, "copied")
+                embedded(a.get("html_url"), title)
+        elif n["key"] == "inbox":
+            for c in b.get("inbox") or []:
+                row("conversation", c.get("subject"), title, "copied", f"{len(c.get('messages') or [])} messages")
+            for c in b.get("inbox_skipped") or []:
+                row("conversation", c.get("subject"), title, "skipped", c.get("reason") or "")
+        elif n["key"] == "course_info":
+            embedded(f"{ORIGIN}/courses/{cid}/assignments/syllabus", title)
+            for e in b.get("events") or []:
+                row("event", e.get("title"), title, "copied", fmt_dt(e.get("start_at")) or "")
+                embedded(e.get("html_url"), title)
+        elif n["key"] == "other_pages":
+            for pg in b.get("extra_pages") or []:
+                oc, d = item_outcome(pg)
+                row("page", pg["title"], title, oc, d or ("course home page" if pg.get("front_page") else "not in any module"))
+                embedded(f"{ORIGIN}/courses/{cid}/pages/{pg.get('page_url')}", title)
+        elif n["key"] == "other_discussions":
+            for d_ in b.get("extra_discussions") or []:
+                oc, d = item_outcome(d_)
+                row("discussion", d_["title"], title, oc, d or ("graded discussion, linked from its assessment note" if d_.get("assignment_id") in P.asg else "not in any module"))
+                embedded(d_.get("html_url"), title)
+                embedded(f"{ORIGIN}/courses/{cid}/discussion_topics/{d_.get('id')}", title)
+    # files: one row per file easel met, whatever became of it
+    for fid, p in P.fplan.items():
+        meta = files.get(fid) or {}
+        name = meta.get("display_name") or f"file {fid}"
+        note = P.file_refs.get(fid)
+        found = note["title"] if note else "Course files"
+        act = p.get("action")
+        if act == "reuse" or (act == "download" and fid in unit.received):
+            x = P.xplan.get(fid) or {}
+            if x.get("missing"):
+                row("file", name, found, "file", f"saved; text unreadable: {x.get('error')}")
+            elif x:
+                row("file", name, found, "file", f"saved; {'slide text' if x.get('kind') == 'slides' else 'text'} saved, {x['words']:,} words")
+            else:
+                row("file", name, found, "file", "saved")
+        elif act == "download":
+            row("file", name, found, "refused", f"download failed: {unit.failed.get(fid, '?')}")
+        elif act == "dead":
+            row("file", name, found, "refused", f"HTTP {p.get('status') or '?'}")
+        elif act == "image":
+            row("file", name, found, "skipped", "image file, images stay on Canvas")
+        elif act == "media":
+            size = p.get("size") or 0
+            row("file", name, found, "link", f"video, audio or large file ({size / (1 << 20):.0f} MB), left as a Canvas link")
+        else:
+            row("file", name, found, "unsupported", str(act))
+    # media that no page text pointed at (older bundles carry no refs)
+    for key, tp in P.tplan.items():
+        if key in done_media:
+            continue
+        found = tp.get("note") or "?"
+        if tp.get("missing"):
+            row("media", tp["title"], found, "refused" if tp.get("status") not in (None, 200) else "unsupported",
+                f"HTTP {tp['status']} on the subtitle track" if tp.get("status") not in (None, 200) else "no transcript on Canvas")
+        else:
+            row("media", tp["title"], found, "transcript", f"{tp['words']:,} words")
+    # whole lists Canvas refused
+    names = {"pages": "page list", "files": "file list", "discussions": "discussion list", "inbox": "Inbox", "staff": "teaching staff",
+             "grading_scheme": "grade scale", "assignment_groups": "assignment groups", "announcements": "announcement list",
+             "submissions": "your submissions", "modules": "module list", "assignments": "assignment list", "course": "course", "events": "calendar"}
+    for k, v in (b.get("api_status") or {}).items():
+        if v not in (200, None):
+            row(k.rstrip("s") if k != "grading_scheme" else "grade scale", names.get(k, k), "whole unit", "refused", f"HTTP {v}")
+    totals = {"outcome": {}, "kind": {}, "service": {}}
+    for r in rows:
+        totals["outcome"][r["outcome"]] = totals["outcome"].get(r["outcome"], 0) + 1
+        totals["kind"][r["kind"]] = totals["kind"].get(r["kind"], 0) + 1
+        if r["outcome"] == "link" and r["kind"] in ("lti", "external"):
+            totals["service"][r["detail"] or "unknown"] = totals["service"].get(r["detail"] or "unknown", 0) + 1
+    return {"rows": rows, "totals": totals}
+
+
+def coverage_line(unit, ledger):
+    """One line for the chat: what easel did with everything Canvas showed it."""
+    t = ledger["totals"]["outcome"]
+    svc = sorted(ledger["totals"]["service"].items(), key=lambda kv: (-kv[1], kv[0]))
+    bits = []
+    if t.get("copied"):
+        bits.append(f"{t['copied']} items copied")
+    if t.get("transcript"):
+        bits.append(f"{t['transcript']} transcript{'s' if t['transcript'] != 1 else ''}")
+    if t.get("file"):
+        bits.append(f"{t['file']} file{'s' if t['file'] != 1 else ''}")
+    if t.get("link"):
+        top = ", ".join(f"{n} {c}" for n, c in svc[:3])
+        bits.append(f"{t['link']} link{'s' if t['link'] != 1 else ''}" + (f" ({top})" if top else ""))
+    if t.get("refused"):
+        bits.append(f"{t['refused']} refused")
+    if t.get("unsupported"):
+        bits.append(f"{t['unsupported']} unsupported")
+    if t.get("skipped"):
+        kinds = {}
+        for r in ledger["rows"]:
+            if r["outcome"] == "skipped":
+                k = "image" if r["kind"] in ("image", "file") else "Inbox thread" if r["kind"] == "conversation" else r["kind"]
+                kinds[k] = kinds.get(k, 0) + 1
+        bits.append(" and ".join(f"{c} {k}{'s' if c != 1 else ''}" for k, c in kinds.items()) + " skipped")
+    return f"{unit.code}: " + ", ".join(bits) if bits else f"{unit.code}: nothing found on Canvas"
+
+
+def write_coverage(unit, P, ledger, line):
+    """`.easel/coverage.json` and `.easel/coverage.md`: the full ledger, totals first."""
+    T, b = unit.target, unit.bundle
+    c = b["course"]
+    data = {"easel": VERSION, "unit": unit.code, "canvas": ORIGIN, "course_id": c["id"], "course_name": c["name"], "updated": TODAY,
+            "summary": line, "totals": ledger["totals"], "rows": ledger["rows"]}
+    write_text(T / ".easel" / "coverage.json", json.dumps(data, indent=1, ensure_ascii=False))
+    t = ledger["totals"]
+    L = [f"# Coverage: {unit.code}", "", f"{line}. Checked {TODAY} against {host_of(ORIGIN)}, easel {VERSION}.", "",
+         "Every item Canvas showed easel in this unit, and what happened to it. Outcomes: copied into a note, transcript saved, "
+         "file saved, left as a link, refused by Canvas, unsupported by easel, skipped by policy.", "",
+         "## Totals", "", "| Outcome | Items |", "| --- | --- |"]
+    L += [f"| {o} | {t['outcome'][o]} |" for o in OUTCOMES if t["outcome"].get(o)]
+    if t["service"]:
+        L += ["", "| Service | Links |", "| --- | --- |"]
+        L += [f"| {cell(n)} | {k} |" for n, k in sorted(t["service"].items(), key=lambda kv: (-kv[1], kv[0]))]
+    L += ["", "| Kind | Items |", "| --- | --- |"]
+    L += [f"| {k} | {v} |" for k, v in sorted(t["kind"].items(), key=lambda kv: (-kv[1], kv[0]))]
+    L += ["", "## Every item", ""]
+    by_note = {}
+    for r in ledger["rows"]:
+        by_note.setdefault(r["found_in"], []).append(r)
+    for note, rs in by_note.items():
+        L += [f"### {note}", "", "| Kind | Title | Outcome | Detail |", "| --- | --- | --- | --- |"]
+        L += [f"| {r['kind']} | {cell(r['title'])[:90]} | {r['outcome']} | {cell(r['detail'])} |" for r in rs]
+        L.append("")
+    write_text(T / ".easel" / "coverage.md", "\n".join(L).rstrip() + "\n")
 
 
 def user_paths(T: Path, P: Planner):
@@ -1926,6 +2476,10 @@ def summary_for(unit, changes):
     n_tr = len(tr.get("new", [])) + len(tr.get("written", []))
     if n_tr:
         bits.append(f"{n_tr} transcript{'s' if n_tr != 1 else ''} saved")
+    tx = unit.result.get("texts") or {}
+    n_tx = len(tx.get("new", [])) + len(tx.get("written", []))
+    if n_tx:
+        bits.append(f"{n_tx} deck{'s' if n_tx != 1 else ''} or document{'s' if n_tx != 1 else ''} as text")
     if not unit.old:
         bits.append(f"first run: {len(P.notes)} notes")
     if not bits and unit.result.get("written"):
@@ -1968,6 +2522,14 @@ def full_report(unit, changes):
         L += ["  no transcript on Canvas: " + x for x in tr.get("missing", [])[:10]]
         if tr.get("edited"):
             L.append("transcripts kept as you edited them: " + ", ".join(tr["edited"]))
+    tx = res.get("texts") or {}
+    if P.xplan:
+        n_ok = sum(1 for p in P.xplan.values() if not p.get("missing"))
+        L.append(f"file text: {n_ok} decks and documents as text ({len(tx.get('new', []))} new, {len(tx.get('written', []))} updated, {tx.get('unchanged', 0)} already here), "
+                 f"{len(tx.get('missing', []))} unreadable")
+        L += [f"  unreadable: {p['title']} ({p.get('error')})" for p in P.xplan.values() if p.get("missing")][:10]
+        if tx.get("edited"):
+            L.append("file text kept as you edited it: " + ", ".join(tx["edited"]))
     if res.get("backup"):
         L.append(f"v3 notes backed up to {Path(res['backup']).relative_to(T).as_posix()}")
     for fid, p in P.fplan.items():
@@ -1986,6 +2548,7 @@ def full_report(unit, changes):
             L.append("new items: " + "; ".join(f"{m[:30]}: {t}" for m, t in changes["added"][:20]))
         if changes.get("edited"):
             L.append("edited on Canvas: " + "; ".join(f"{m[:30]}: {t}" for m, t in changes["edited"][:20]))
+    L.append("coverage: " + getattr(unit, "coverage_line", "").split(": ", 1)[-1] + " | every item in .easel/coverage.md")
     L.append("status: " + week_status(P).replace("**", ""))
     rub = [a for a in b.get("assignments") or [] if a.get("rubric")]
     graded = [a for a in b.get("assignments") or [] if (a.get("submission") or {}).get("score") is not None]
@@ -2315,6 +2878,8 @@ def summary_text(srv, elapsed):
     for u in units:
         if u.done:
             lines.append("- " + u.summary.split("\n")[0])
+            if getattr(u, "coverage_line", ""):
+                lines.append("  " + u.coverage_line)
             # A note the student edited stays as they left it, and the chat says nothing about it (owner's rule, 2026-10-07):
             # students update notes by hand when their university changes its rules, such as when Gen AI is allowed.
             if getattr(u, "checks", {}).get("links_bad"):
@@ -2337,7 +2902,7 @@ def summary_text(srv, elapsed):
     roots = sorted({str(u.target.parent) for u in units if u.target})
     if roots:
         lines.append("Notes: " + "; ".join(roots))
-    return "\n".join(lines[:12])
+    return "\n".join(lines[:20])
 
 
 def serve(args):

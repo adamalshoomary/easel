@@ -18,7 +18,7 @@ https://github.com/user-attachments/assets/f1512e3e-4c7e-4c2a-9b41-571083998323
 
 <p align="center">
 <b>5 units in 81 seconds</b> &nbsp;·&nbsp; <b>1% of a Pro plan's 5-hour limit</b><br>
-<sub>A real run on five QUT units. The wait plays at 5× speed.</sub>
+<sub>A real run on five QUT units, 7 October 2026. The wait plays at 5× speed.</sub>
 </p>
 
 You need Claude Code on a paid plan, the [Claude in Chrome extension](https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn) and Python 3.8 or newer.
@@ -78,8 +78,10 @@ IFB220 Introduction to AI/
 ├── 1 Course Info/      staff, groups, syllabus, announcements, Inbox
 ├── 2 Assessments/      brief, rubric, your files, mark, feedback; Grades.md
 ├── 3 Weeks/            one note per week
-└── Files/              attachments, submissions, marked-up feedback PDFs
+└── Files/              attachments, submissions, marked-up feedback PDFs, video transcripts, slide text
 ```
+
+Lecture slides and Word handouts get a text file beside them, so you can search them. Each unit folder also keeps a list of everything Canvas showed easel and what it did with each item, in `.easel/coverage.md`.
 
 Grades.md shows your average on marked work and the mark you need for each grade. Each later run updates the notes and lists what changed. Write your own notes under **My notes**. easel keeps them, and it never changes a file it did not create.
 
@@ -87,9 +89,12 @@ Grades.md shows your average on marked work and the mark you need for each grade
 
 - easel runs on your computer. Canvas data goes from your Chrome tab to your notes folder.
 - Claude sees the folder paths, the address of the Canvas tab and the summary of each run. The summary can show assessment names, new marks and your average on marked work.
+- While easel collects feedback, Claude also sees the address of the Canvas document viewer, which carries a session token.
 - easel only reads Canvas. When easel opens a feedback file, Canvas marks it as seen.
 - Marked-up PDFs need third-party cookies for Canvas. Chrome allows them by default.
-- New Quizzes and lecture recordings stay as links.
+- A video that Canvas hosts gets a transcript file when Canvas has subtitles for it. Recordings on other services, such as Echo360 and YouTube, and New Quizzes stay as links, with the service named.
+- To name a Canvas tool link, easel opens the link's Canvas page. It never opens the tool itself.
+- For a classic quiz, easel copies your attempts: each question, the options and whether you got it right. Canvas does not say which option you picked.
 - If Canvas hides your unit total, easel still works out your average on marked work. Your university calculates your real result from the rules in your unit outline.
 - easel updates itself from each new release. To update now, run `/easel update`.
 - If you installed easel before 4.1.0, install it again. Those copies cannot update themselves.

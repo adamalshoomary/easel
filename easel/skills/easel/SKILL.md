@@ -1,6 +1,6 @@
 ---
 name: easel
-description: Copy Canvas LMS units into organised Markdown notes for Obsidian or any Markdown app. One note per week and one per assessment, with the brief, rubric, the student's submission, marks, rubric levels reached, marker comments, annotated feedback PDFs and transcripts of Canvas-hosted lecture videos, plus a Grades note with the mark needed for each grade. Use when the user asks to scrape, sync, update, download or back up Canvas units, notes, rubrics, grades or feedback, or runs /easel with unit codes.
+description: Copy Canvas LMS units into organised Markdown notes for Obsidian or any Markdown app. One note per week and one per assessment, with the brief, rubric, the student's submission, marks, rubric levels reached, marker comments, annotated feedback PDFs, transcripts of Canvas-hosted lecture videos, the text of lecture slides and Word handouts, your quiz attempts, plus a Grades note with the mark needed for each grade and a coverage list of everything Canvas showed. Use when the user asks to scrape, sync, update, download or back up Canvas units, notes, rubrics, grades or feedback, or runs /easel with unit codes.
 argument-hint: <UNIT CODES> [--canvas <url>] [--root <notes folder>] | update
 allowed-tools: Bash, Read, AskUserQuestion, mcp__claude-in-chrome__tabs_context_mcp, mcp__claude-in-chrome__navigate, mcp__claude-in-chrome__javascript_tool, mcp__claude-in-chrome__browser_batch, mcp__claude-in-chrome__tabs_close_mcp, mcp__claude-in-chrome__list_connected_browsers
 ---
@@ -13,14 +13,6 @@ Run every step yourself, in this session. Do not spawn subagents. Do not read, e
 
 v4 uses Claude Code and Claude in Chrome. Installing this skill in another agent does not provide the browser tools.
 
-A 2026-10-12 review found preservation failures in 4.2.0, and 4.3.0 has not repaired them. Updates can overwrite a personal index or remove personal text after a module disappears.
-Failed Canvas reads can also remove saved marks or feedback while reporting success. Some grade estimates are incorrect.
-
-Before updating existing notes, verify that a full backup exists. Use an explicit scratch notes folder for trial runs.
-Tell the student these current limits before their first run with this version. Reuse known backup and consent information on follow-ups.
-Do not describe the intended preservation rules as proven for every update case.
-
-The accepted direction keeps the current output and repairs these failures before speed changes or an independent command.
 Keep using the current workflow until a tested replacement ships. Do not invent browser integrations for other agents.
 
 ## Terms

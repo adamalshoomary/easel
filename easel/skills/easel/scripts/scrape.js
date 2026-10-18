@@ -75,11 +75,15 @@ const BLOCK = new Set(['p','div','section','article','header','footer','main','a
 const SKIP = new Set(['script','style','noscript','template','button','input','select','textarea','svg','canvas','object','head','title','meta','link']);
 
 function MD(html, base) {
-  if (!html) return {md: '', files: [], media: [], expected: 0, missing: []};
+  if (!html) return {md: '', files: [], media: [], refs: [], expected: 0, missing: []};
   const doc = new DOMParser().parseFromString('<div id="__r">' + html + '</div>', 'text/html');
   const root = doc.getElementById('__r');
   const files = new Set();
   const media = new Map();   // key -> title, for Canvas-hosted video and audio
+  // Every object this text points at, for the coverage ledger. The helper decides what each one becomes.
+  const refs = [], seen = new Set();
+  const ref = (kind, id, title, extra) => { const k = kind + '\0' + id; if (seen.has(k)) return; seen.add(k); refs.push({kind, id: String(id), title: (title || '').trim(), ...(extra || {})}); };
+  const LTI_RE = /\/external_tools\/(retrieve|\d+)/;
   const abs = (h) => { try { return new URL(h, base || ORIGIN + '/').href; } catch { return h; } };
   const inline = (s) => s.replace(/\s*\n\s*/g, ' ').replace(/ {2,}/g, ' ').trim();
   const wrap = (s, mark) => { if (!s.trim() || s.includes('\n')) return s; const m = s.match(/^(\s*)([\s\S]*?)(\s*)$/); return m[1] + mark + m[2] + mark + m[3]; };
@@ -123,14 +127,19 @@ function MD(html, base) {
         if (!h || h.startsWith('javascript:')) return t;
         const u = abs(h);
         const f = isCanvas(u) && u.match(FILE_RE);
-        if (f && !/\/users\/\d+\/files/.test(u)) { const id = f[1] || f[2]; files.add(id); return '[' + t + '](FILE:' + id + ')'; }
+        if (f && !/\/users\/\d+\/files/.test(u)) { const id = f[1] || f[2]; files.add(id); ref('file', id, t); return '[' + t + '](FILE:' + id + ')'; }
         if (u.startsWith(ORIGIN) && h.startsWith('#')) return t;
+        if (isCanvas(u) && LTI_RE.test(u)) ref('lti', u, t); else if (!isCanvas(u) && /^https?:/.test(u)) ref('external', u, t);
         return '[' + (t || u) + '](' + enc(u) + ')';
       }
       case 'img': {
-        if (/\bequation_image\b/.test(cls)) { const tex = n.getAttribute('data-equation-content') || n.getAttribute('alt') || ''; return tex ? '$' + tex.trim() + '$' : ''; }
+        const isrc = abs(n.getAttribute('src') || '');
+        if (/\bequation_image\b/.test(cls)) { const tex = n.getAttribute('data-equation-content') || n.getAttribute('alt') || ''; ref('image', isrc, tex, {image: 'equation'}); return tex ? '$' + tex.trim() + '$' : ''; }
         const alt = (n.getAttribute('alt') || '').trim();
-        if (c.link || !alt || IMG_NAME.test(alt) || /^image$/i.test(alt) || DECOR.test(alt)) return '';
+        const fm = isCanvas(isrc) && isrc.match(FILE_RE);
+        const decorative = !alt || IMG_NAME.test(alt) || /^image$/i.test(alt) || DECOR.test(alt);
+        ref('image', fm ? (fm[1] || fm[2]) : isrc, alt, {image: decorative ? (alt ? 'decorative' : 'no alt text') : 'alt text', host: isCanvas(isrc) ? '' : isrc});
+        if (c.link || decorative) return '';
         return '[image: ' + alt + ']';
       }
       case 'iframe': case 'video': case 'audio': case 'embed': {
@@ -143,8 +152,10 @@ function MD(html, base) {
         if (mm) {
           const key = (mm[0].includes('media_attachments') ? 'att:' : 'obj:') + mm[1];
           if (!media.has(key)) media.set(key, title || 'Video');
+          ref('media', key, title || 'Video');
           return '\n\n[' + (title || 'Video on Canvas') + '](' + enc(src) + ')\n\nTRANSCRIPT:' + key + '\n\n';
         }
+        ref(isCanvas(src) && LTI_RE.test(src) ? 'lti' : 'external', src, title || 'Embedded ' + tag);
         return '\n\n[' + (title || 'Embedded ' + tag) + '](' + enc(src) + ')\n\n';
       }
       case 'pre': {
@@ -243,7 +254,7 @@ function MD(html, base) {
   for (const w of words(md.replace(/[*`~]/g, ''))) have.set(w, (have.get(w) || 0) + 1);
   const missing = [];
   for (const w of expected) { const k = have.get(w) || 0; if (k) have.set(w, k - 1); else missing.push(w); }
-  return {md, files: [...files], media: [...media], expected: expected.length, missing};
+  return {md, files: [...files], media: [...media], refs, expected: expected.length, missing};
 }
 
 window.__EASEL_MD = MD;   // for checking a single page in the console
@@ -278,9 +289,9 @@ async function scrapeUnit(U) {
   const page = (slug) => `${ORIGIN}/courses/${cid}/pages/${slug}`;
   await log(`${U.unit}: course ${cid}`);
 
-  const [mods, asg, ann, crs, tabs, disc, groupsR, subs, pagesAll, filesAll, front, staffR, inboxA, inboxB, scheme] = await Promise.all([
+  const [mods, asg, ann, crs, tabs, disc, groupsR, subs, pagesAll, filesAll, front, staffR, inboxA, inboxB, scheme, eventsR] = await Promise.all([
     api(`${B}/modules?include[]=items&include[]=content_details&per_page=100`, {all: true}),
-    api(`${B}/assignments?per_page=100&order_by=due_at`, {all: true}),
+    api(`${B}/assignments?per_page=100&order_by=due_at&include[]=score_statistics`, {all: true}),
     api(`${B}/discussion_topics?only_announcements=true&per_page=100`, {all: true}),
     api(`${B}?include[]=syllabus_body&include[]=term&include[]=teachers`),
     api(`${B}/tabs`),
@@ -294,6 +305,7 @@ async function scrapeUnit(U) {
     api(`/api/v1/conversations?scope=inbox&filter[]=course_${cid}&per_page=100`, {all: true}),
     api(`/api/v1/conversations?scope=archived&filter[]=course_${cid}&per_page=100`, {all: true}),
     graphql('query($id: ID!) { course(id: $id) { gradingStandard { title data { letterGrade baseValue } } } }', {id: String(cid)}),
+    api(`/api/v1/calendar_events?context_codes[]=course_${cid}&all_events=true&per_page=100`, {all: true}),
   ]);
   const ok = (r) => r.status === 200 && Array.isArray(r.data) ? r.data : [];
 
@@ -301,8 +313,10 @@ async function scrapeUnit(U) {
   const allMedia = new Map();
   const fileMeta = {};
   const coverage = {words: 0, missing: 0, pages: []};
+  const refs = {};   // Canvas address of a text -> the objects it points at
   const md = (html, base) => {
     const r = MD(html, base); r.files.forEach(f => allFiles.add(f)); (r.media || []).forEach(([k, title]) => { if (!allMedia.has(k)) allMedia.set(k, title); });
+    if (r.refs && r.refs.length) refs[base || ORIGIN] = (refs[base || ORIGIN] || []).concat(r.refs);
     coverage.words += r.expected || 0;
     if (r.missing && r.missing.length) { coverage.missing += r.missing.length; coverage.pages.push({url: base, missing: r.missing.slice(0, 12), n: r.missing.length}); }
     return r.md;
@@ -329,16 +343,16 @@ async function scrapeUnit(U) {
   }
   const convs = new Map();
   for (const c of [...ok(inboxA), ...ok(inboxB)]) convs.set(c.id, c);
-  const inbox = [];
-  await pool([...convs.values()].slice(0, 100), 4, async (c) => {
+  const inbox = [], inbox_skipped = [];
+  await pool([...convs.values()], 4, async (c) => {
     const r = await api(`/api/v1/conversations/${c.id}?auto_mark_as_read=false`);
-    if (r.status !== 200 || !r.data) return;
+    if (r.status !== 200 || !r.data) { inbox_skipped.push({id: c.id, subject: c.subject || '(no subject)', reason: 'HTTP ' + r.status}); return; }
     const who = {};
     for (const p of (r.data.participants || [])) who[p.id] = p.name || p.full_name;
     const msgs = (r.data.messages || []).map(m => ({author: who[m.author_id] || null, author_id: m.author_id, staff: staffIds.has(m.author_id),
       created_at: m.created_at, body: (m.body || '').replace(/\r\n?/g, '\n'),
       attachments: (m.attachments || []).map(a => ownFile(a, {role: 'inbox'}))}));
-    if (!msgs.some(m => m.staff)) return;   // keep conversations with a message from teaching staff
+    if (!msgs.some(m => m.staff)) { inbox_skipped.push({id: c.id, subject: r.data.subject || '(no subject)', reason: 'no message from teaching staff'}); return; }
     inbox.push({id: c.id, subject: r.data.subject || '(no subject)', last_at: r.data.last_message_at || c.last_message_at, messages: msgs.reverse()});
   });
 
@@ -354,7 +368,7 @@ async function scrapeUnit(U) {
   for (const s of ok(subs)) subByAsg[s.assignment_id] = s;
   const feedbackCandidates = [];
   const previewUrl = {};
-  const submissionOf = (aid) => {
+  const submissionOf = (aid, base) => {
     const s = subByAsg[aid];
     if (!s) return null;
     const files = (s.attachments || []).map(a => {
@@ -369,7 +383,7 @@ async function scrapeUnit(U) {
     if (!s.submitted_at && s.score == null && !comments.length && !s.excused && !s.missing && !files.length) return null;
     return {id: s.id, workflow_state: s.workflow_state, attempt: s.attempt, submitted_at: s.submitted_at, graded_at: s.graded_at, posted_at: s.posted_at,
       score: s.score, grade: s.grade, late: !!s.late, missing: !!s.missing, excused: !!s.excused, seconds_late: s.seconds_late || 0,
-      submission_type: s.submission_type, url: s.url || null, body_md: s.body ? md(s.body, ORIGIN) : '', files, comments,
+      submission_type: s.submission_type, url: s.url || null, body_md: s.body ? md(s.body, base) : '', files, comments,
       rubric_assessment: s.rubric_assessment || null,
       history: (s.submission_history || []).filter(h => h.attempt && h.attempt !== s.attempt).map(h => ({attempt: h.attempt, submitted_at: h.submitted_at,
         files: (h.attachments || []).map(a => a.display_name)}))};
@@ -381,7 +395,8 @@ async function scrapeUnit(U) {
     group_category_id: a.group_category_id || null, published: a.published !== false,
     locked: !!a.locked_for_user, lock_explanation: a.lock_explanation || null,
     assignment_group_id: a.assignment_group_id || null, rubric: rubricOf(a), rubric_settings: rubricSettings(a),
-    submission: submissionOf(a.id), description_md: md(a.description, a.html_url)});
+    score_statistics: a.score_statistics || null,
+    submission: submissionOf(a.id, a.html_url), description_md: md(a.description, a.html_url)});
   const asgById = {};
   const assignments = ok(asg).map(a => (asgById[a.id] = asgObj(a)));
 
@@ -403,6 +418,22 @@ async function scrapeUnit(U) {
     return {status: 200, entries};
   };
 
+  // the student's own attempts at a classic quiz: score per attempt, each question, and whether the answer was right
+  const quizAttempts = async (qid, base) => {
+    const r = await api(`${B}/quizzes/${qid}/submissions`);
+    const subsQ = r.status === 200 && r.data && Array.isArray(r.data.quiz_submissions) ? r.data.quiz_submissions : [];
+    const out = {status: r.status, attempts: []};
+    for (const s of subsQ) {
+      if (s.workflow_state !== 'complete' && s.workflow_state !== 'pending_review') continue;
+      const q = await api(`/api/v1/quiz_submissions/${s.id}/questions`);
+      const qs = q.status === 200 && q.data && Array.isArray(q.data.quiz_submission_questions) ? q.data.quiz_submission_questions : [];
+      out.attempts.push({id: s.id, attempt: s.attempt, score: s.score, kept_score: s.kept_score, points_possible: s.quiz_points_possible, finished_at: s.finished_at,
+        questions_status: q.status, questions: qs.map(x => ({name: x.question_name, type: x.question_type, text_md: md(x.question_text, base), points: x.points_possible,
+          answers: (x.answers || []).map(a => (a.text || a.html || '').replace(/<[^>]+>/g, '').trim()).filter(Boolean), correct: typeof x.correct === 'boolean' ? x.correct : (x.correct === 'partial' ? 'partial' : null)}))});
+    }
+    return out;
+  };
+
   // every module item body, in parallel
   const items = modules.flatMap(m => (m.items || []).map(it => ({m, it})));
   await pool(items, 6, async ({it}) => {
@@ -420,7 +451,8 @@ async function scrapeUnit(U) {
       out.assignment_id = it.content_id;
     } else if (it.type === 'Quiz') {
       const r = await api(`${B}/quizzes/${it.content_id}`);
-      if (r.status === 200) { const q = r.data; Object.assign(out, {updated_at: q.updated_at || null, quiz: {question_count: q.question_count, points_possible: q.points_possible, due_at: q.due_at, unlock_at: q.unlock_at, lock_at: q.lock_at, allowed_attempts: q.allowed_attempts, time_limit: q.time_limit, assignment_id: q.assignment_id}, body_md: md(q.description, it.html_url), locked: !!q.locked_for_user, lock_explanation: q.lock_explanation || null}); }
+      if (r.status === 200) { const q = r.data; Object.assign(out, {updated_at: q.updated_at || null, quiz: {question_count: q.question_count, points_possible: q.points_possible, due_at: q.due_at, unlock_at: q.unlock_at, lock_at: q.lock_at, allowed_attempts: q.allowed_attempts, time_limit: q.time_limit, assignment_id: q.assignment_id, quiz_type: q.quiz_type, show_correct_answers: q.show_correct_answers !== false}, body_md: md(q.description, it.html_url), locked: !!q.locked_for_user, lock_explanation: q.lock_explanation || null});
+        out.attempts = await quizAttempts(it.content_id, it.html_url); }
       else out.status = r.status;
     } else if (it.type === 'Discussion') {
       const r = discById[it.content_id] ? {status: 200, data: discById[it.content_id]} : await api(`${B}/discussion_topics/${it.content_id}`);
@@ -445,7 +477,6 @@ async function scrapeUnit(U) {
   // content that no module links to: pages (the home page too), discussions and course files
   const modSlugs = new Set(items.filter(x => x.it.page_url).map(x => x.it.page_url));
   const modDisc = new Set(items.filter(x => x.it.type === 'Discussion').map(x => x.it.content_id));
-  const asgDisc = new Set(assignments.map(a => a.discussion_id).filter(Boolean));
   const extra_pages = [];
   const pageList = ok(pagesAll).filter(p => !modSlugs.has(p.url) && p.published !== false);
   if (front.status === 200 && front.data && front.data.url && !modSlugs.has(front.data.url) && !pageList.some(p => p.url === front.data.url)) pageList.unshift(front.data);
@@ -457,9 +488,9 @@ async function scrapeUnit(U) {
       : {page_url: p.url, title: p.title, updated_at: p.updated_at, status: r.status, locked: true});
   });
   const extra_discussions = [];
-  await pool(ok(disc).filter(d => !modDisc.has(d.id) && !asgDisc.has(d.id)), 4, async (d) => {
+  await pool(ok(disc).filter(d => !modDisc.has(d.id)), 4, async (d) => {
     (d.attachments || []).forEach(x => allFiles.add(String(x.id)));
-    extra_discussions.push({id: d.id, title: d.title, html_url: d.html_url, posted_at: d.posted_at, author: d.author && d.author.display_name,
+    extra_discussions.push({id: d.id, title: d.title, html_url: d.html_url, posted_at: d.posted_at, author: d.author && d.author.display_name, assignment_id: d.assignment_id || null,
       updated_at: d.updated_at || d.last_reply_at || null, body_md: md(d.message, d.html_url), locked: !!d.locked_for_user,
       lock_explanation: d.lock_explanation || null, attachments: (d.attachments || []).map(x => String(x.id)), replies: await repliesOf(d.id)});
   });
@@ -468,6 +499,21 @@ async function scrapeUnit(U) {
     const id = String(f.id);
     if (!allFiles.has(id)) { allFiles.add(id); extra_files.push(id); }
   }
+  // Canvas tool links (LTI 1.3) carry only a lookup id. The link's own Canvas page holds the launch form, and its action names the tool's host.
+  // This reads the Canvas page only. Nothing is sent to the tool (owner, 2026-10-18).
+  const toolUrls = new Set();
+  for (const rs of Object.values(refs)) for (const r of rs) if (r.kind === 'lti' && /lookup_uuid=/.test(r.id)) toolUrls.add(r.id);
+  for (const m of modules) for (const it of (m.items || [])) if (it.type === 'ExternalTool' && it.external_url && /lookup_uuid=/.test(it.external_url)) toolUrls.add(it.external_url);
+  const tools = {};
+  await pool([...toolUrls], 4, async (u) => {
+    try {
+      const r = await slot(() => fetch(u, {credentials: 'include'}));
+      const html = r.ok ? await r.text() : '';
+      const m = html.match(/<form[^>]*\saction="([^"]+)"/i);
+      tools[u] = m ? {status: r.status, host: new URL(m[1].replace(/&amp;/g, '&')).hostname} : {status: r.status, host: null};
+    } catch (e) { tools[u] = {status: 0, host: null}; }
+  });
+
   // subtitle tracks of Canvas-hosted media: one read per video, text included
   const media = {};
   await pool([...allMedia.entries()], 6, async ([key, title]) => {
@@ -497,7 +543,9 @@ async function scrapeUnit(U) {
              hide_final_grades: !!cs.hide_final_grades, apply_group_weights: !!cs.apply_assignment_group_weights,
              grading_scheme: std && Array.isArray(std.data) ? {title: std.title, data: std.data.map(d => [d.letterGrade, d.baseValue])} : null,
              tabs: ok(tabs).filter(t => t.hidden !== true).map(t => ({label: t.label, type: t.type, html_url: t.full_url || (t.html_url ? ORIGIN + t.html_url : null)}))},
-    staff, groups, inbox, media, student_locale: CFG.locale || null,
+    staff, groups, inbox, inbox_skipped, media, refs, tools, student_locale: CFG.locale || null,
+    events: ok(eventsR).map(e => ({id: e.id, title: e.title, start_at: e.start_at, end_at: e.end_at, all_day: !!e.all_day, location: e.location_name || null,
+      description_md: md(e.description, e.html_url), html_url: e.html_url})),
     modules: modules.map(m => ({id: m.id, name: m.name, position: m.position, unlock_at: m.unlock_at, state: m.state, items_count: m.items_count,
       items: (m.items || []).map(it => ({id: it.id, type: it.type, title: it.title, indent: it.indent, content_id: it.content_id, page_url: it.page_url,
         html_url: it.html_url, external_url: it.external_url, published: it.published, ...it.x}))})),
@@ -507,7 +555,7 @@ async function scrapeUnit(U) {
     feedback_candidates: feedbackCandidates,
     api_status: {modules: mods.status, assignments: asg.status, announcements: ann.status, course: crs.status, assignment_groups: groupsR.status,
                  submissions: subs.status, pages: pagesAll.status, files: filesAll.status, discussions: disc.status, staff: staffR.status,
-                 inbox: inboxA.status, grading_scheme: scheme.status},
+                 inbox: inboxA.status, grading_scheme: scheme.status, events: eventsR.status},
     fetch_ms: Math.round(performance.now() - t0),
     coverage,
   };

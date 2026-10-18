@@ -111,7 +111,7 @@ def make_bundle(weighted=True):
     }
 
 
-def run_unit(bundle, root, received=None, reset_edited=False, feedback=None):
+def run_unit(bundle, root, received=None, reset_edited=False, feedback=None, blobs=None):
     """Plan and write one unit the way the server does, with fake downloads."""
     easel.set_origin(ORIGIN)
     u = easel.Unit(bundle["unit"], easel.find_target(Path(root), bundle["unit"]), Path(root))
@@ -119,13 +119,58 @@ def run_unit(bundle, root, received=None, reset_edited=False, feedback=None):
     need, keys = easel.plan_unit(u, copy.deepcopy(bundle))
     for fid in need:
         p = u.staging / fid
-        p.write_bytes(PDF if fid == "601" else b"x" * 10)
+        p.write_bytes((blobs or {}).get(fid) or (PDF if fid == "601" else b"x" * 10))
         u.received[fid] = p
     easel.finalize(u)
     if feedback is not None:
         u.viewer_keys = keys
         easel.apply_feedback({u.code: u}, feedback)
     return u
+
+
+A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+P_ = "http://schemas.openxmlformats.org/presentationml/2006/main"
+R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _zip(parts):
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, data in parts.items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+def make_pptx():
+    """Three slides: a title slide, a slide with speaker notes, a slide with a table. Slide 3 comes first in the file list."""
+    def sp(*paras):
+        return f'<p:sp xmlns:p="{P_}" xmlns:a="{A}"><p:txBody>' + "".join(f"<a:p><a:r><a:t>{t}</a:t></a:r></a:p>" for t in paras) + "</p:txBody></p:sp>"
+    slide = lambda body: f'<p:sld xmlns:p="{P_}" xmlns:a="{A}"><p:cSld><p:spTree>{body}</p:spTree></p:cSld></p:sld>'
+    tbl = (f'<p:graphicFrame xmlns:p="{P_}" xmlns:a="{A}"><a:graphic><a:graphicData><a:tbl>'
+           '<a:tr><a:tc><a:txBody><a:p><a:r><a:t>Layer</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Example</a:t></a:r></a:p></a:txBody></a:tc></a:tr>'
+           '<a:tr><a:tc><a:txBody><a:p><a:r><a:t>Link</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Ethernet</a:t></a:r></a:p></a:txBody></a:tc></a:tr>'
+           '</a:tbl></a:graphicData></a:graphic></p:graphicFrame>')
+    return _zip({
+        "ppt/presentation.xml": f'<p:presentation xmlns:p="{P_}" xmlns:r="{R}"><p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId3"/><p:sldId id="258" r:id="rId1"/></p:sldIdLst></p:presentation>',
+        "ppt/_rels/presentation.xml.rels": f'<Relationships xmlns="{REL}"><Relationship Id="rId1" Target="slides/slide1.xml"/><Relationship Id="rId2" Target="slides/slide2.xml"/><Relationship Id="rId3" Target="slides/slide3.xml"/></Relationships>',
+        "ppt/slides/slide2.xml": slide(sp("Welcome to IFB102") + sp("Bits and bytes", "Why they matter")),
+        "ppt/slides/slide3.xml": slide(sp("Networks") + sp("Layers of the stack")),
+        "ppt/slides/_rels/slide3.xml.rels": f'<Relationships xmlns="{REL}"><Relationship Id="rId9" Target="../notesSlides/notesSlide1.xml"/></Relationships>',
+        "ppt/notesSlides/notesSlide1.xml": slide(sp("Remind them about the quiz.") + sp("2")),
+        "ppt/slides/slide1.xml": slide(tbl),
+    })
+
+
+def make_docx():
+    para = lambda t, style=None, num=False: (f'<w:p><w:pPr>{f"<w:pStyle w:val={chr(34)}{style}{chr(34)}/>" if style else ""}{"<w:numPr/>" if num else ""}</w:pPr><w:r><w:t>{t}</w:t></w:r></w:p>')
+    cell_ = lambda t: f"<w:tc>{para(t)}</w:tc>"
+    body = (para("Assessment brief", "Heading1") + para("Write a report on one computer system.") + para("Write 500 words.", num=True) +
+            f"<w:tbl><w:tr>{cell_('Criterion')}{cell_('Marks')}</w:tr><w:tr>{cell_('Analysis')}{cell_('10')}</w:tr></w:tbl>")
+    return _zip({"word/document.xml": f'<w:document xmlns:w="{W}"><w:body>{body}</w:body></w:document>'})
 
 
 VTT = 'WEBVTT\n\nNOTE made up for the tests\n\n1\n00:00:01.000 --> 00:00:03.000\n<v Lecturer>Welcome to week one.</v>\n\n2\n00:00:03.000 --> 00:00:05.000\nWelcome to week one. Today we cover\n\n3\n00:00:05.000 --> 00:00:07.000\nToday we cover networks &amp; graphs.\n\n4\n00:00:12.000 --> 00:00:14.000\nAfter a long pause, we continue\n\n5\n00:00:14.500 --> 00:01:15.000\nwith a second paragraph that runs past a minute and has no sentence end yet\n\n6\n00:01:15.000 --> 00:01:17.000\nuntil here.\n\n7\n00:01:17.500 --> 00:01:19.000\nA third paragraph starts.\n'
@@ -295,7 +340,8 @@ class Notes(unittest.TestCase):
         b = make_bundle()
         page = b["modules"][0]["items"][0]
         page["body_md"] = ("Watch this.\n\n[Lecture 1.mp4](%s/media_attachments_iframe/77?embedded=true&type=video)\n\nTRANSCRIPT:att:77\n\n"
-                           "[Silent clip.mp4](%s/media_attachments_iframe/78?embedded=true&type=video)\n\nTRANSCRIPT:att:78\n\nThe end.") % (ORIGIN, ORIGIN)
+                           "- In a list:\n  [Silent clip.mp4](%s/media_attachments_iframe/78?embedded=true&type=video)\n  TRANSCRIPT:att:78\n"
+                           "- Also listed:\n  [Lecture 1.mp4](%s/media_attachments_iframe/77?embedded=true&type=video)\n  TRANSCRIPT:att:77\n\nThe end.") % (ORIGIN, ORIGIN, ORIGIN)
         b["student_locale"] = "en-AU"
         b["media"] = {"att:77": {"kind": "attachment", "id": "77", "title": "Lecture 1.mp4", "status": 200,
                                  "tracks": [{"id": 1, "kind": "subtitles", "locale": "en-GB", "content": VTT}]},
@@ -308,7 +354,8 @@ class Notes(unittest.TestCase):
         self.assertIn("easel: transcript", text)
         self.assertIn("**[0:00:01]** Welcome to week one.", text)
         week = (T / "3 Weeks" / "Week 01 - Basics.md").read_text(encoding="utf-8")
-        self.assertIn("Transcript: [Lecture 1](../Files/Week%2001/Transcripts/Lecture%201.md)", week)
+        self.assertIn("\n\nTranscript: [Lecture 1](../Files/Week%2001/Transcripts/Lecture%201.md)", week)
+        self.assertIn("\n  Transcript: [Lecture 1](../Files/Week%2001/Transcripts/Lecture%201.md)", week)   # indented inside a list item
         self.assertNotIn("TRANSCRIPT:", week)
         self.assertFalse((T / "Files" / "Week 01" / "Transcripts" / "Silent clip.md").exists())
         self.assertIn("no transcript on Canvas: Silent clip", u.report)
@@ -325,6 +372,187 @@ class Notes(unittest.TestCase):
         u3 = run_unit(b, self.root)
         self.assertEqual(u3.result["transcripts"]["edited"], ["Lecture 1.md"])
         self.assertIn("My own line.", tr.read_text(encoding="utf-8"))
+
+    def test_coverage_ledger(self):
+        b = make_bundle()
+        page = b["modules"][0]["items"][0]
+        url = f"{ORIGIN}/courses/9/pages/welcome"
+        page["body_md"] = ("Hello. Slides: [slides](FILE:502). Figure: [image: a diagram]\n\n"
+                           "[Lecture 1.mp4](%s/media_attachments_iframe/77?type=video)\n\nTRANSCRIPT:att:77\n\n"
+                           "[Silent clip.mp4](%s/media_attachments_iframe/78?type=video)\n\nTRANSCRIPT:att:78\n\n"
+                           "[Lecture recording](https://echo360.net.au/lesson/1)\n\n[Quiz tool](%s/courses/9/external_tools/retrieve?url=https%%3A%%2F%%2Fh5p.com%%2Fx)\n\n"
+                           "Read [the docs](https://www.python.org/doc/).") % (ORIGIN, ORIGIN, ORIGIN)
+        b["refs"] = {url: [
+            {"kind": "file", "id": "502", "title": "slides"},
+            {"kind": "image", "id": "503", "title": "a diagram", "image": "alt text", "host": ""},
+            {"kind": "image", "id": f"{ORIGIN}/files/900/preview", "title": "", "image": "no alt text", "host": ""},
+            {"kind": "image", "id": f"{ORIGIN}/files/901/preview", "title": "logo", "image": "decorative", "host": ""},
+            {"kind": "image", "id": f"{ORIGIN}/equation_images/x", "title": "x^2", "image": "equation"},
+            {"kind": "media", "id": "att:77", "title": "Lecture 1.mp4"},
+            {"kind": "media", "id": "att:78", "title": "Silent clip.mp4"},
+            {"kind": "external", "id": "https://echo360.net.au/lesson/1", "title": "Lecture recording"},
+            {"kind": "lti", "id": f"{ORIGIN}/courses/9/external_tools/retrieve?url=https%3A%2F%2Fh5p.com%2Fx", "title": "Quiz tool"},
+            {"kind": "external", "id": "https://www.python.org/doc/", "title": "the docs"},
+        ]}
+        b["student_locale"] = "en-AU"
+        b["media"] = {"att:77": {"kind": "attachment", "id": "77", "title": "Lecture 1.mp4", "status": 200,
+                                 "tracks": [{"id": 1, "kind": "subtitles", "locale": "en-GB", "content": VTT}]},
+                      "att:78": {"kind": "attachment", "id": "78", "title": "Silent clip.mp4", "status": 200, "tracks": []}}
+        b["inbox_skipped"] = [{"id": 12, "subject": "Group chat", "reason": "no message from teaching staff"}]
+        b["api_status"] = {"files": 403}
+        b["modules"][1]["items"].append({"id": 22, "type": "ExternalUrl", "title": "Padlet board", "external_url": "https://padlet.com/x/y"})
+        u = run_unit(b, self.root)
+        T = self.unit_dir()
+        data = json.loads((T / ".easel" / "coverage.json").read_text(encoding="utf-8"))
+        rows = data["rows"]
+        # copied: Welcome page, the equation image, the Assignment 1 card, the My notes page, the Overview page, 3 assessment notes,
+        # 1 announcement, 1 Inbox thread. Then 1 transcript, 1 video without one, 3 links on the page plus the Padlet item,
+        # 3 images and diagram.png and 1 Inbox thread skipped, 4 files saved, and the refused file list.
+        expect = {"copied": 1 + 1 + 1 + 1 + 1 + 3 + 1 + 1, "transcript": 1, "unsupported": 1, "link": 3 + 1, "skipped": 3 + 1 + 1, "file": 4, "refused": 1}
+        self.assertEqual(data["totals"]["outcome"], expect, json.dumps(rows, indent=1))
+        self.assertEqual(len(rows), sum(expect.values()))
+        self.assertEqual(data["totals"]["service"], {"Echo360": 1, "H5P": 1, "python.org": 1, "Padlet": 1})
+        by = {(r["kind"], r["title"]): r for r in rows}
+        self.assertEqual(by[("image", "x^2")]["outcome"], "copied")
+        self.assertIn("decorative", by[("image", "logo")]["detail"])
+        self.assertEqual(by[("image", "a diagram")]["found_in"], "Week 01 - Basics")
+        self.assertEqual(by[("media", "Silent clip")]["detail"], "no transcript on Canvas")
+        self.assertEqual(by[("conversation", "Group chat")]["outcome"], "skipped")
+        self.assertEqual(by[("file", "file list")]["detail"], "HTTP 403")
+        self.assertEqual(by[("file", "diagram.png")]["outcome"], "skipped")
+        self.assertEqual(u.coverage_line, "ABC101: 10 items copied, 1 transcript, 4 files, 4 links (Echo360 1, H5P 1, Padlet 1), 1 refused, 1 unsupported, 4 images and 1 Inbox thread skipped")
+        md = (T / ".easel" / "coverage.md").read_text(encoding="utf-8")
+        self.assertTrue(md.startswith("# Coverage: ABC101\n\n" + u.coverage_line + "."))
+        self.assertIn("### Week 01 - Basics", md)
+        self.assertIn("coverage: 10 items copied", u.report)
+
+        class Srv:
+            units = {u.code: u}
+            viewer_expected = []
+
+            class run:
+                @staticmethod
+                def status():
+                    return {}
+        self.assertIn("\n  " + u.coverage_line, easel.summary_text(Srv, 10))
+        # the second run writes the same ledger
+        run_unit(b, self.root)
+        self.assertEqual(json.loads((T / ".easel" / "coverage.json").read_text(encoding="utf-8"))["rows"], rows)
+        self.assertEqual((T / ".easel" / "coverage.md").read_text(encoding="utf-8"), md)
+
+    def test_q15_content(self):
+        """Tool names, class statistics, dates, quiz attempts, a graded discussion outside modules, the staff fallback."""
+        b = make_bundle()
+        tool = f"{ORIGIN}/courses/9/external_tools/retrieve?display=in_rce&resource_link_lookup_uuid=abc"
+        page = b["modules"][0]["items"][0]
+        page["body_md"] = f"Watch [Embedded iframe]({tool}) and [Lecture 3](https://echo360.net.au/lesson/9) and [the docs](https://www.python.org/)."
+        b["tools"] = {tool: {"status": 200, "host": "mediahub.canvas.qut.edu.au"}}
+        b["refs"] = {f"{ORIGIN}/courses/9/pages/welcome": [{"kind": "lti", "id": tool, "title": "Embedded iframe"},
+                                                             {"kind": "external", "id": "https://echo360.net.au/lesson/9", "title": "Lecture 3"},
+                                                             {"kind": "external", "id": "https://www.python.org/", "title": "the docs"}]}
+        b["assignments"][0]["score_statistics"] = {"min": 8, "max": 20, "mean": 14.5, "median": 15}
+        b["assignments"][1]["is_quiz_lti"] = True
+        disc = {"id": 77, "title": "Week 3 debate", "html_url": f"{ORIGIN}/courses/9/discussion_topics/77", "posted_at": "2026-08-01T00:00:00Z",
+                "author": "Dr Tutor", "assignment_id": 104, "body_md": "Argue a side.", "attachments": [], "replies": {"status": 200, "entries": [
+                    {"depth": 0, "author": "Ann", "created_at": "2026-08-02T00:00:00Z", "message_md": "I say yes."}]}}
+        b["extra_discussions"] = [disc]
+        b["assignments"].append({"id": 104, "name": "Debate post", "due_at": "2026-08-10T13:59:00Z", "points_possible": 10, "grading_type": "points",
+                                 "published": True, "submission_types": ["discussion_topic"], "html_url": f"{ORIGIN}/courses/9/assignments/104",
+                                 "assignment_group_id": 1, "rubric": [], "description_md": "Post once.", "discussion_id": 77, "submission": None})
+        b["modules"][1]["items"].append({"id": 23, "type": "Quiz", "title": "Week 2 quiz", "content_id": 500, "html_url": f"{ORIGIN}/courses/9/quizzes/500",
+            "quiz": {"question_count": 2, "points_possible": 2, "allowed_attempts": -1, "time_limit": None, "assignment_id": None, "quiz_type": "practice_quiz"},
+            "body_md": "Try it.", "attempts": {"status": 200, "attempts": [{"id": 1, "attempt": 1, "score": 1, "kept_score": 1, "points_possible": 2,
+            "finished_at": "2026-08-05T00:00:00Z", "questions_status": 200, "questions": [
+                {"name": "Q1", "type": "true_false_question", "text_md": "<span>Bits are binary.</span>", "points": 1, "answers": ["True", "False"], "correct": True},
+                {"name": "Q2", "type": "multiple_choice_question", "text_md": "A byte has", "points": 1, "answers": ["4 bits", "8 bits"], "correct": False}]}]}})
+        b["events"] = [{"id": 5, "title": "Guest lecture", "start_at": "2026-09-10T04:00:00Z", "end_at": None, "all_day": False, "location": "Room 101",
+                        "description_md": "Bring questions.", "html_url": f"{ORIGIN}/calendar?event_id=5"}]
+        b["staff"] = []
+        b["api_status"] = {"staff": 403}
+        u = run_unit(b, self.root)
+        T = self.unit_dir()
+        week1 = (T / "3 Weeks" / "Week 01 - Basics.md").read_text(encoding="utf-8")
+        self.assertIn(f"[MediaHub]({tool})", week1)                       # a generic label becomes the tool's name
+        self.assertIn("[Lecture 3 (Echo360)](https://echo360.net.au/lesson/9)", week1)
+        self.assertIn("[the docs](https://www.python.org/)", week1)        # an ordinary website keeps its label
+        a1 = next((T / "2 Assessments").glob("Assignment 1*.md")).read_text(encoding="utf-8")
+        self.assertIn("Class: mean 14.5, from 8 to 20 out of 20", a1)
+        a2 = next((T / "2 Assessments").glob("Assignment 2*.md")).read_text(encoding="utf-8")
+        self.assertIn("New Quiz: Canvas does not let students read the questions", a2)
+        debate = next((T / "2 Assessments").glob("Debate post*.md")).read_text(encoding="utf-8")
+        self.assertIn("[Read the thread and replies](../1%20Course%20Info/Discussions%20not%20in%20any%20module.md)", debate)
+        other = (T / "1 Course Info" / "Discussions not in any module.md").read_text(encoding="utf-8")
+        self.assertIn("I say yes.", other)
+        self.assertIn("Open the assessment note", other)
+        week2 = (T / "3 Weeks" / "Week 02 - More.md").read_text(encoding="utf-8")
+        self.assertIn("### Your attempts", week2)
+        self.assertIn("**Attempt 1** · 1 / 2", week2)
+        self.assertIn("1. Bits are binary. ✓", week2)
+        self.assertIn("2. A byte has ✗", week2)
+        self.assertIn("Options: 4 bits; 8 bits", week2)
+        info = (T / "1 Course Info" / "00 Course Info.md").read_text(encoding="utf-8")
+        self.assertIn("## Dates", info)
+        self.assertIn("[Guest lecture](", info)
+        self.assertIn("Room 101", info)
+        self.assertIn("Canvas refused the staff list (HTTP 403)", info)
+        rows = json.loads((T / ".easel" / "coverage.json").read_text(encoding="utf-8"))["rows"]
+        by = {(r["kind"], r["title"]): r for r in rows}
+        self.assertEqual(by[("lti", "Embedded iframe")]["detail"], "MediaHub")
+        self.assertEqual(by[("event", "Guest lecture")]["outcome"], "copied")
+        self.assertEqual(by[("quiz", "Week 2 quiz")]["detail"], "description, settings and 1 attempt")
+        self.assertIn("graded discussion", by[("discussion", "Week 3 debate")]["detail"])
+        ok, bad, broken, leftovers, orphans = easel.check_links(T)
+        self.assertEqual((bad, leftovers), (0, []), broken)
+        u2 = run_unit(b, self.root)
+        self.assertEqual(u2.result["written"], [])
+
+    def test_q20_file_text(self):
+        """A deck and a Word file get a text file beside them, linked from the note; a broken deck is reported."""
+        b = make_bundle()
+        b["files"]["504"] = {"id": "504", "display_name": "Week 1 lecture.pptx", "size": 0, "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "updated_at": "2026-07-01T00:00:00Z"}
+        b["files"]["505"] = {"id": "505", "display_name": "Brief.docx", "size": 0, "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "updated_at": "2026-07-01T00:00:00Z"}
+        b["files"]["506"] = {"id": "506", "display_name": "Broken.pptx", "size": 0, "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "updated_at": "2026-07-01T00:00:00Z"}
+        b["modules"][0]["items"][0]["body_md"] = "Slides: [deck](FILE:504). Brief: [brief](FILE:505). Old: [old](FILE:506)."
+        pptx, docx = make_pptx(), make_docx()
+        b["files"]["504"]["size"], b["files"]["505"]["size"], b["files"]["506"]["size"] = len(pptx), len(docx), 3
+        u = run_unit(b, self.root, blobs={"504": pptx, "505": docx, "506": b"bad"})
+        T = self.unit_dir()
+        deck = T / "Files" / "Week 01" / "Slides text" / "Week 1 lecture.md"
+        self.assertTrue(deck.exists())
+        text = deck.read_text(encoding="utf-8")
+        self.assertIn("easel: slides", text)
+        self.assertIn("slides: 3", text)
+        self.assertIn("## Slide 1: Welcome to IFB102", text)
+        self.assertIn("Bits and bytes", text)
+        self.assertIn("## Slide 2: Networks", text)
+        self.assertIn("**Speaker notes**\n\nRemind them about the quiz.", text)
+        self.assertIn("## Slide 3", text)
+        self.assertIn("| Layer | Example |", text)
+        brief = T / "Files" / "Week 01" / "Document text" / "Brief.md"
+        self.assertTrue(brief.exists())
+        bt = brief.read_text(encoding="utf-8")
+        self.assertIn("## Assessment brief", bt)
+        self.assertIn("- Write 500 words.", bt)
+        self.assertIn("| Criterion | Marks |", bt)
+        week = (T / "3 Weeks" / "Week 01 - Basics.md").read_text(encoding="utf-8")
+        self.assertIn("[deck](../Files/Week%2001/Week%201%20lecture.pptx) · [slide text](../Files/Week%2001/Slides%20text/Week%201%20lecture.md)", week)
+        self.assertIn("[brief](../Files/Week%2001/Brief.docx) · [text](../Files/Week%2001/Document%20text/Brief.md)", week)
+        self.assertIn("[old](../Files/Week%2001/Broken.pptx).", week)
+        self.assertIn("unreadable: Broken.pptx (BadZipFile", u.report)
+        self.assertIn("2 decks or documents as text", u.summary)
+        rows = json.loads((T / ".easel" / "coverage.json").read_text(encoding="utf-8"))["rows"]
+        by = {(r["kind"], r["title"]): r for r in rows}
+        self.assertTrue(by[("file", "Week 1 lecture.pptx")]["detail"].startswith("saved; slide text saved, "))
+        self.assertTrue(by[("file", "Broken.pptx")]["detail"].startswith("saved; text unreadable: BadZipFile"))
+        ok, bad, broken, leftovers, orphans = easel.check_links(T)
+        self.assertEqual((bad, leftovers), (0, []), broken)
+        self.assertNotIn("Files/Week 01/Slides text/Week 1 lecture.md", orphans)
+        u2 = run_unit(b, self.root, blobs={"504": pptx, "505": docx, "506": b"bad"})
+        self.assertEqual(u2.result["texts"]["unchanged"], 2)
+        self.assertEqual(u2.result["written"], [])
+        deck.write_text(text + "\nMy own line.\n", encoding="utf-8")
+        u3 = run_unit(b, self.root, blobs={"504": pptx, "505": docx, "506": b"bad"})
+        self.assertEqual(u3.result["texts"]["edited"], ["Week 1 lecture.md"])
 
     def test_annotated_feedback(self):
         fb = {"results": [{"key": "7001-601", "status": "ok", "pdf": base64.b64encode(PDF).decode(),
