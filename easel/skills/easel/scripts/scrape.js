@@ -75,10 +75,11 @@ const BLOCK = new Set(['p','div','section','article','header','footer','main','a
 const SKIP = new Set(['script','style','noscript','template','button','input','select','textarea','svg','canvas','object','head','title','meta','link']);
 
 function MD(html, base) {
-  if (!html) return {md: '', files: [], expected: 0, missing: []};
+  if (!html) return {md: '', files: [], media: [], expected: 0, missing: []};
   const doc = new DOMParser().parseFromString('<div id="__r">' + html + '</div>', 'text/html');
   const root = doc.getElementById('__r');
   const files = new Set();
+  const media = new Map();   // key -> title, for Canvas-hosted video and audio
   const abs = (h) => { try { return new URL(h, base || ORIGIN + '/').href; } catch { return h; } };
   const inline = (s) => s.replace(/\s*\n\s*/g, ' ').replace(/ {2,}/g, ' ').trim();
   const wrap = (s, mark) => { if (!s.trim() || s.includes('\n')) return s; const m = s.match(/^(\s*)([\s\S]*?)(\s*)$/); return m[1] + mark + m[2] + mark + m[3]; };
@@ -136,7 +137,15 @@ function MD(html, base) {
         let src = n.getAttribute('src') || (n.querySelector && n.querySelector('source[src]') ? n.querySelector('source[src]').getAttribute('src') : '') || '';
         if (src) src = abs(src);
         const title = (n.getAttribute('title') || '').trim();
-        return src ? '\n\n[' + (title || 'Embedded ' + tag) + '](' + enc(src) + ')\n\n' : '';
+        if (!src) return '';
+        // Canvas hosts the video itself: ask Canvas for its subtitle track later, and leave a place for the transcript link.
+        const mm = isCanvas(src) && (src.match(/\/media_attachments_iframe\/(\d+)/) || src.match(/\/media_objects(?:_iframe)?\/([\w-]+)/));
+        if (mm) {
+          const key = (mm[0].includes('media_attachments') ? 'att:' : 'obj:') + mm[1];
+          if (!media.has(key)) media.set(key, title || 'Video');
+          return '\n\n[' + (title || 'Video on Canvas') + '](' + enc(src) + ')\n\nTRANSCRIPT:' + key + '\n\n';
+        }
+        return '\n\n[' + (title || 'Embedded ' + tag) + '](' + enc(src) + ')\n\n';
       }
       case 'pre': {
         const t = preText(n).replace(/^\n+|\s+$/g, '');
@@ -234,7 +243,7 @@ function MD(html, base) {
   for (const w of words(md.replace(/[*`~]/g, ''))) have.set(w, (have.get(w) || 0) + 1);
   const missing = [];
   for (const w of expected) { const k = have.get(w) || 0; if (k) have.set(w, k - 1); else missing.push(w); }
-  return {md, files: [...files], expected: expected.length, missing};
+  return {md, files: [...files], media: [...media], expected: expected.length, missing};
 }
 
 window.__EASEL_MD = MD;   // for checking a single page in the console
@@ -289,10 +298,11 @@ async function scrapeUnit(U) {
   const ok = (r) => r.status === 200 && Array.isArray(r.data) ? r.data : [];
 
   const allFiles = new Set();
+  const allMedia = new Map();
   const fileMeta = {};
   const coverage = {words: 0, missing: 0, pages: []};
   const md = (html, base) => {
-    const r = MD(html, base); r.files.forEach(f => allFiles.add(f));
+    const r = MD(html, base); r.files.forEach(f => allFiles.add(f)); (r.media || []).forEach(([k, title]) => { if (!allMedia.has(k)) allMedia.set(k, title); });
     coverage.words += r.expected || 0;
     if (r.missing && r.missing.length) { coverage.missing += r.missing.length; coverage.pages.push({url: base, missing: r.missing.slice(0, 12), n: r.missing.length}); }
     return r.md;
@@ -458,6 +468,17 @@ async function scrapeUnit(U) {
     const id = String(f.id);
     if (!allFiles.has(id)) { allFiles.add(id); extra_files.push(id); }
   }
+  // subtitle tracks of Canvas-hosted media: one read per video, text included
+  const media = {};
+  await pool([...allMedia.entries()], 6, async ([key, title]) => {
+    const [kind, id] = key.split(':');
+    const path = kind === 'att' ? `/api/v1/media_attachments/${id}/media_tracks` : `/api/v1/media_objects/${id}/media_tracks`;
+    const r = await api(path + '?include[]=content');
+    const tracks = r.status === 200 && Array.isArray(r.data)
+      ? r.data.map(x => ({id: x.id, kind: x.kind, locale: x.locale, content: x.content || ''})) : [];
+    media[key] = {kind: kind === 'att' ? 'attachment' : 'object', id, title, status: r.status, tracks};
+  });
+
   const assignment_groups = ok(groupsR).map(g => ({id: g.id, name: g.name, position: g.position, group_weight: g.group_weight, rules: g.rules || {}}));
 
   // metadata for linked course files
@@ -476,7 +497,7 @@ async function scrapeUnit(U) {
              hide_final_grades: !!cs.hide_final_grades, apply_group_weights: !!cs.apply_assignment_group_weights,
              grading_scheme: std && Array.isArray(std.data) ? {title: std.title, data: std.data.map(d => [d.letterGrade, d.baseValue])} : null,
              tabs: ok(tabs).filter(t => t.hidden !== true).map(t => ({label: t.label, type: t.type, html_url: t.full_url || (t.html_url ? ORIGIN + t.html_url : null)}))},
-    staff, groups, inbox,
+    staff, groups, inbox, media, student_locale: CFG.locale || null,
     modules: modules.map(m => ({id: m.id, name: m.name, position: m.position, unlock_at: m.unlock_at, state: m.state, items_count: m.items_count,
       items: (m.items || []).map(it => ({id: it.id, type: it.type, title: it.title, indent: it.indent, content_id: it.content_id, page_url: it.page_url,
         html_url: it.html_url, external_url: it.external_url, published: it.published, ...it.x}))})),
@@ -515,6 +536,7 @@ async function scrapeUnit(U) {
 
 window.__EASEL_RUN = (async () => {
   const me = await api('/api/v1/users/self');
+  if (me.status === 200 && me.data) CFG.locale = me.data.locale || me.data.effective_locale || null;
   if (me.status !== 200) {
     await post('/login?run=' + CFG.run, String(me.status)).catch(() => {});
     return 'not signed in to Canvas';

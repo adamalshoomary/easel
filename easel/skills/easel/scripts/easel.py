@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import filecmp
 import hashlib
+import html
 import json
 import os
 import re
@@ -37,7 +38,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "4.2.0"
+VERSION = "4.3.0"
 REPO = "adamalshoomary/easel"
 # Updates come from the latest published release. EASEL_FROM points at another copy of the release files, for tests.
 RELEASE = (os.environ.get("EASEL_FROM") or "https://github.com/" + REPO + "/releases/latest/download").rstrip("/") + "/"
@@ -563,6 +564,7 @@ class Planner:
         self.grades = Grades(bundle)
         self.scheme = scheme_of(bundle)
         self.asg_note = {}
+        self.tplan = {}
 
     # ---- existing notes on disk
     def existing_notes(self):
@@ -1286,6 +1288,33 @@ class Planner:
     def need(self):
         return [fid for fid, p in self.fplan.items() if p["action"] == "download"]
 
+    # ---- transcripts of Canvas-hosted videos
+    def plan_transcripts(self):
+        media = self.b.get("media") or {}
+        locale = self.b.get("student_locale")
+        claimed = set()
+        for note in self.notes:
+            text = "\n".join(s for _, s in note["secs"] if s)
+            for kind, mid in TRANSCRIPT_RE.findall(text):
+                key = f"{kind}:{mid}"
+                if key in self.tplan:
+                    continue
+                m = media.get(key) or {"kind": "attachment" if kind == "att" else "object", "id": mid, "title": "", "status": None, "tracks": []}
+                title = MEDIA_EXT.sub("", (m.get("title") or "").strip()).strip() or f"Video {mid}"
+                track = choose_track(m.get("tracks"), locale)
+                doc = transcript_doc(self.u, key, m, track, title) if track else None
+                if not doc:
+                    self.tplan[key] = {"missing": True, "title": title, "status": m.get("status")}
+                    continue
+                fm, body, n, duration = doc
+                folder = self.T / "Files" / self.note_folder(note) / "Transcripts"
+                path = folder / (clean_file_name(title) + ".md")
+                if str(path).lower() in claimed:
+                    path = folder / (clean_file_name(title) + f"-{mid}.md")
+                claimed.add(str(path).lower())
+                self.tplan[key] = {"path": path, "fm": fm, "text": body, "words": n, "duration_text": fmt_duration(duration), "title": title}
+        return self
+
     # ---- annotated feedback: which submission files to open in the document viewer
     def viewer_keys(self, candidates):
         if not self.u.feedback_enabled:
@@ -1333,6 +1362,149 @@ def clean_file_name(name):
     return (clean_name(base) or "file") + re.sub(r"[^\w.]", "", ext)[:12]
 
 
+# ---------------------------------------------------------------- transcripts
+# Canvas keeps a subtitle track for many of the videos it hosts. The browser script puts each track in the
+# bundle under "media". The helper turns the track into paragraphs with a time at the start of each one.
+TRANSCRIPT_RE = re.compile(r"^TRANSCRIPT:(att|obj):([\w-]+)$", re.M)
+CUE_TIME_RE = re.compile(r"(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?")
+MEDIA_EXT = re.compile(r"\.(mp4|m4v|m4a|mp3|mov|webm|wav|ogg|avi|wmv|mkv|aac|flac)$", re.I)
+
+
+def cue_seconds(s):
+    m = CUE_TIME_RE.search(s or "")
+    if not m:
+        return 0.0
+    h, mi, se, ms = m.groups()
+    return int(h or 0) * 3600 + int(mi) * 60 + int(se) + int((ms or "0").ljust(3, "0")) / 1000
+
+
+def parse_cues(text):
+    """WebVTT or SRT text -> [(start, end, text)]. Tags such as <v Name> and <c> are dropped."""
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    cues = []
+    for block in re.split(r"\n{2,}", text):
+        lines = block.split("\n")
+        idx = next((i for i, ln in enumerate(lines) if "-->" in ln), None)
+        if idx is None:
+            continue
+        a, b = lines[idx].split("-->", 1)
+        start, end = cue_seconds(a), cue_seconds(b.strip().split(" ")[0] if b.strip() else "")
+        body = " ".join(ln.strip() for ln in lines[idx + 1:] if ln.strip())
+        body = html.unescape(re.sub(r"<[^>]+>", "", body))
+        body = re.sub(r"\s+", " ", body).strip()
+        if body:
+            cues.append((start, max(end, start), body))
+    return cues
+
+
+def merge_rolling(cues):
+    """Rolling captions repeat the end of one cue at the start of the next. Keep each phrase once."""
+    out = []
+    for s, e, txt in cues:
+        if out:
+            ps, pe, ptxt = out[-1]
+            if txt == ptxt or ptxt.endswith(txt):
+                out[-1] = (ps, e, ptxt)
+                continue
+            if txt.startswith(ptxt):
+                out[-1] = (ps, e, txt)
+                continue
+            pw, w = ptxt.split(" "), txt.split(" ")
+            for k in range(min(len(pw), len(w), 12), 2, -1):
+                if pw[-k:] == w[:k]:
+                    txt = " ".join(w[k:])
+                    break
+            if not txt:
+                out[-1] = (ps, e, ptxt)
+                continue
+        out.append((s, e, txt))
+    return out
+
+
+SPEAKER_RE = re.compile(r"^([A-Z][\w.'’-]*(?: [A-Z][\w.'’-]*){0,3}): (?=\S)")
+
+
+def split_speaker(txt):
+    """Zoom and Teams captions start each cue with 'Name: '. Return (name or None, the words)."""
+    m = SPEAKER_RE.match(txt)
+    if m and len(m.group(1)) <= 40:
+        return m.group(1), txt[m.end():]
+    return None, txt
+
+
+def paragraphs(cues, every=60, gap=3):
+    """Join cues into paragraphs: [(start, speaker or None, text)].
+    A paragraph ends when the speaker changes, at a silence over 3 seconds, or at a sentence end once it is 60 seconds long."""
+    paras, cur = [], None
+    for s, e, raw in cues:
+        who, txt = split_speaker(raw)
+        if not txt:
+            continue
+        if cur is None:
+            cur = [s, e, who, [txt]]
+            continue
+        ends = re.search(r"[.!?][\"'”’)\]]*$", cur[3][-1]) is not None
+        if (who and who != cur[2]) or s - cur[1] > gap or (s - cur[0] >= every and ends):
+            paras.append(cur)
+            cur = [s, e, who, [txt]]
+        else:
+            cur[1] = e
+            cur[3].append(txt)
+    if cur:
+        paras.append(cur)
+    return [(p[0], p[2], " ".join(p[3])) for p in paras]
+
+
+def fmt_hms(sec):
+    sec = int(sec)
+    h, r = divmod(sec, 3600)
+    m, s = divmod(r, 60)
+    return f"{h}:{m:02d}:{s:02d}"
+
+
+def fmt_duration(sec):
+    m = int(round(sec / 60))
+    if m < 60:
+        return f"{max(m, 1)} min"
+    return f"{m // 60} h {m % 60:02d} min"
+
+
+def choose_track(tracks, locale):
+    """The track in the student's Canvas language, else English, else the first one with text."""
+    tracks = [x for x in tracks or [] if (x.get("content") or "").strip()]
+    if not tracks:
+        return None
+    loc = (locale or "").lower()
+    lang = loc.split("-")[0]
+    for pick in ((lambda x: loc and (x.get("locale") or "").lower() == loc),
+                 (lambda x: lang and (x.get("locale") or "").lower().startswith(lang)),
+                 (lambda x: (x.get("locale") or "").lower().startswith("en"))):
+        hit = next((x for x in tracks if pick(x)), None)
+        if hit:
+            return hit
+    return tracks[0]
+
+
+def transcript_doc(unit, key, m, track, title):
+    """Frontmatter items and body for one transcript file, or None when the track holds no words."""
+    cues = merge_rolling(parse_cues(track.get("content")))
+    paras = paragraphs(cues)
+    if not paras:
+        return None
+    kind, mid = m.get("kind"), m.get("id")
+    url = f"{ORIGIN}/media_attachments_iframe/{mid}" if kind == "attachment" else f"{ORIGIN}/media_objects_iframe/{mid}"
+    body = "\n\n".join(f"**[{fmt_hms(s)}]**" + (f" **{who}:**" if who else "") + f" {txt}" for s, who, txt in paras)
+    duration = max(e for _, e, _ in cues)
+    n = words(body)
+    fm = {"easel": "transcript", "unit": unit.code, "canvas": url, "media": f"{kind}:{mid}", "language": track.get("locale"),
+          "kind": track.get("kind"), "words": n, "duration": fmt_duration(duration)}
+    what = "subtitles" if (track.get("kind") or "") == "subtitles" else (track.get("kind") or "track")
+    lead = (f"# {title}\n\n*Transcript from the Canvas {what}"
+            + (f" ({track.get('locale')})" if track.get("locale") else "")
+            + ". Times are hours:minutes:seconds into the video.*\n\n")
+    return fm, lead + body + "\n", n, duration
+
+
 # ---------------------------------------------------------------- writing
 def resolve_links(text, note_dir: Path, planner: Planner, received):
     files = planner.b.get("files") or {}
@@ -1359,10 +1531,17 @@ def resolve_links(text, note_dir: Path, planner: Planner, received):
     def rep_path(m):
         label, rel = m.group(1), urllib.parse.unquote(m.group(2))
         return f"[{label}]({link_path(note_dir, T / rel)})"
+    def rep_transcript(m):
+        p = planner.tplan.get(f"{m.group(1)}:{m.group(2)}")
+        if not p or p.get("missing"):
+            return ""
+        label = p["title"].replace("[", "(").replace("]", ")")
+        return f"Transcript: [{label}]({link_path(note_dir, Path(p['path']))}) · {p['words']:,} words · {p['duration_text']}"
     text = re.sub(r"\[((?:[^\]\\]|\\.)*)\]\(FILE:(\d+)\)", rep_file, text)
     text = re.sub(r"\[([^\]]*)\]\(NOTE:([^)]+)\)", rep_note, text)
     text = re.sub(r"\[([^\]]*)\]\(PATH:([^)]+)\)", rep_path, text)
-    return text
+    text = TRANSCRIPT_RE.sub(rep_transcript, text)
+    return re.sub(r"\n{3,}", "\n\n", text)
 
 
 def note_body(note):
@@ -1454,7 +1633,7 @@ def check_links(T: Path):
             if d == "." and md.name != "INDEX.md":
                 continue
             t = read_text(md)
-            if re.search(r"\((?:FILE|NOTE|PATH):[^)]+\)", t):
+            if re.search(r"\((?:FILE|NOTE|PATH):[^)]+\)", t) or TRANSCRIPT_RE.search(t):
                 leftovers.append(md.name)
             for m in re.finditer(r"\]\(([^)\s]+)\)", t):
                 u = m.group(1).strip("<>")
@@ -1640,6 +1819,7 @@ def finalize(unit: Unit, phase="main"):
         elif st in ("written", "new") and phase == "main":
             res["written" if st == "written" else "new"].append(n["path"].name)
     if phase == "main":
+        write_transcripts(unit, P)
         # v3 notes that v4 replaces, such as "Assignments.md", go away when nobody edited them. The backup holds them.
         for e in P.stale:
             prev = old_notes.get(e["path"].relative_to(T).as_posix())
@@ -1667,6 +1847,8 @@ def finalize(unit: Unit, phase="main"):
                          "rubric_criteria": len(a.get("rubric") or []), "graded": (a.get("submission") or {}).get("score") is not None}
                         for a in b.get("assignments") or []],
         "feedback": P.feedback,
+        "transcripts": [{"key": k, "path": Path(p["path"]).relative_to(T).as_posix(), "sha": p["sha"], "words": p["words"]}
+                        for k, p in P.tplan.items() if not p.get("missing") and p.get("sha")],
     }
     write_text(T / ".easel" / "manifest.json", json.dumps(manifest, indent=1, ensure_ascii=False))
     if phase == "main" and (T / ".canvas-manifest.json").exists() and res.get("backup"):
@@ -1676,6 +1858,38 @@ def finalize(unit: Unit, phase="main"):
     write_text(T / ".easel" / "report.txt", unit.report + "\n")
     unit.summary = "\n".join(summary_lines)
     unit.done = True
+
+
+def write_transcripts(unit, P):
+    """Write one transcript file per video. A file the student changed stays as they left it."""
+    res = unit.result
+    tr = res.setdefault("transcripts", {"new": [], "written": [], "unchanged": 0, "edited": [], "missing": []})
+    old = {x.get("key"): x for x in unit.old.get("transcripts", [])}
+    for key, p in P.tplan.items():
+        if p.get("missing"):
+            tr["missing"].append(p["title"])
+            continue
+        path, prev = Path(p["path"]), old.get(key) or {}
+        cur = read_text(path) if path.exists() else None
+        if cur is not None:
+            if prev.get("sha") and sha(cur) != prev["sha"]:
+                tr["edited"].append(path.name)
+                p["sha"] = prev["sha"]
+                continue
+            fm_old, _ = split_frontmatter(cur)
+            candidate = render_fm(p["fm"], [], fm_value(fm_old, "updated") or TODAY) + p["text"]
+            if normalize(candidate) == normalize(cur):
+                tr["unchanged"] += 1
+                p["sha"] = sha(cur)
+                continue
+            if not prev.get("sha"):          # no record of writing this file: it is not ours to replace
+                tr["edited"].append(path.name)
+                p["sha"] = None
+                continue
+        text = render_fm(p["fm"], [], TODAY) + p["text"]
+        write_text(path, text)
+        p["sha"] = sha(text)
+        tr["new" if cur is None else "written"].append(path.name)
 
 
 def user_paths(T: Path, P: Planner):
@@ -1708,6 +1922,10 @@ def summary_for(unit, changes):
     fb = unit.result.get("feedback_saved") or []
     if fb:
         bits.append("annotated feedback saved for " + ", ".join(fb[:3]))
+    tr = unit.result.get("transcripts") or {}
+    n_tr = len(tr.get("new", [])) + len(tr.get("written", []))
+    if n_tr:
+        bits.append(f"{n_tr} transcript{'s' if n_tr != 1 else ''} saved")
     if not unit.old:
         bits.append(f"first run: {len(P.notes)} notes")
     if not bits and unit.result.get("written"):
@@ -1743,6 +1961,13 @@ def full_report(unit, changes):
          f"{acts.get('image', 0)} images and {acts.get('media', 0)} video, audio or large files left as Canvas links"]
     if res.get("written") and len(res["written"]) <= 12:
         L.append("notes updated: " + ", ".join(res["written"]))
+    tr = res.get("transcripts") or {}
+    if P.tplan:
+        L.append(f"transcripts: {len(tr.get('new', []))} new, {len(tr.get('written', []))} updated, {tr.get('unchanged', 0)} already here, "
+                 f"{len(tr.get('missing', []))} videos without a transcript on Canvas")
+        L += ["  no transcript on Canvas: " + x for x in tr.get("missing", [])[:10]]
+        if tr.get("edited"):
+            L.append("transcripts kept as you edited them: " + ", ".join(tr["edited"]))
     if res.get("backup"):
         L.append(f"v3 notes backed up to {Path(res['backup']).relative_to(T).as_posix()}")
     for fid, p in P.fplan.items():
@@ -1916,6 +2141,7 @@ def plan_unit(unit: Unit, bundle):
         raise RuntimeError(f"the unit folder belongs to Canvas course {unit.old['course_id']}, but Canvas returned course {bundle['course']['id']}")
     P = Planner(unit, bundle).build().assign_paths()
     P.plan_files()
+    P.plan_transcripts()
     unit.plan = P
     unit.before = snapshot(user_paths(unit.target, P))
     unit.viewer_keys = P.viewer_keys(bundle.get("feedback_candidates"))

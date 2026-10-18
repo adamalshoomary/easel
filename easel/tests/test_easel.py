@@ -128,7 +128,30 @@ def run_unit(bundle, root, received=None, reset_edited=False, feedback=None):
     return u
 
 
+VTT = 'WEBVTT\n\nNOTE made up for the tests\n\n1\n00:00:01.000 --> 00:00:03.000\n<v Lecturer>Welcome to week one.</v>\n\n2\n00:00:03.000 --> 00:00:05.000\nWelcome to week one. Today we cover\n\n3\n00:00:05.000 --> 00:00:07.000\nToday we cover networks &amp; graphs.\n\n4\n00:00:12.000 --> 00:00:14.000\nAfter a long pause, we continue\n\n5\n00:00:14.500 --> 00:01:15.000\nwith a second paragraph that runs past a minute and has no sentence end yet\n\n6\n00:01:15.000 --> 00:01:17.000\nuntil here.\n\n7\n00:01:17.500 --> 00:01:19.000\nA third paragraph starts.\n'
+SRT = '1\n00:00:01,000 --> 00:00:02,500\nFirst line.\n\n2\n00:00:02,500 --> 00:00:04,000\nSecond line.\n'
+
+
 class Helpers(unittest.TestCase):
+    def test_vtt_to_paragraphs(self):
+        cues = easel.merge_rolling(easel.parse_cues(VTT))
+        paras = easel.paragraphs(cues)
+        self.assertEqual(paras[0][2], "Welcome to week one. Today we cover networks & graphs.")   # rolling repeats merged, tags and entities gone
+        self.assertEqual([easel.fmt_hms(s) for s, _, _ in paras], ["0:00:01", "0:00:12", "0:01:17"])
+        self.assertTrue(paras[1][2].endswith("until here."))                                # the 60 s rule waits for a sentence end
+        zoom = [(0, 2, "Ann Lee: Hello all."), (2, 4, "Ann Lee: Today is week two."), (4, 6, "Bob Ray: Can you hear me?"), (6, 8, "Ann Lee: Yes.")]
+        paras = easel.paragraphs(zoom)
+        self.assertEqual([(w, x) for _, w, x in paras], [("Ann Lee", "Hello all. Today is week two."), ("Bob Ray", "Can you hear me?"), ("Ann Lee", "Yes.")])
+        self.assertEqual(easel.fmt_duration(3905), "1 h 05 min")
+        self.assertEqual(easel.fmt_duration(600), "10 min")
+
+    def test_srt_cues(self):
+        cues = easel.parse_cues(SRT)
+        self.assertEqual(cues, [(1.0, 2.5, "First line."), (2.5, 4.0, "Second line.")])
+        self.assertIsNone(easel.choose_track([{"locale": "en", "content": ""}], "en-AU"))
+        picked = easel.choose_track([{"locale": "fr", "content": "a"}, {"locale": "en-GB", "content": "b"}], "en-AU")
+        self.assertEqual(picked["locale"], "en-GB")
+
     def test_split_my_notes(self):
         body = "# T\n\ntext\n\n## My notes\n\n" + easel.MY_NOTES_HINT + "\n\nmine\n"
         gen, mine = easel.split_my_notes(body)
@@ -267,6 +290,41 @@ class Notes(unittest.TestCase):
         self.assertIn("Weights changed on Canvas.", w.read_text(encoding="utf-8"))
         self.assertTrue(list((T / ".easel" / "backups").rglob(w.name)))
         self.assertIn(w.name, u2.result["reset"])
+
+    def test_transcripts_written_and_linked(self):
+        b = make_bundle()
+        page = b["modules"][0]["items"][0]
+        page["body_md"] = ("Watch this.\n\n[Lecture 1.mp4](%s/media_attachments_iframe/77?embedded=true&type=video)\n\nTRANSCRIPT:att:77\n\n"
+                           "[Silent clip.mp4](%s/media_attachments_iframe/78?embedded=true&type=video)\n\nTRANSCRIPT:att:78\n\nThe end.") % (ORIGIN, ORIGIN)
+        b["student_locale"] = "en-AU"
+        b["media"] = {"att:77": {"kind": "attachment", "id": "77", "title": "Lecture 1.mp4", "status": 200,
+                                 "tracks": [{"id": 1, "kind": "subtitles", "locale": "en-GB", "content": VTT}]},
+                      "att:78": {"kind": "attachment", "id": "78", "title": "Silent clip.mp4", "status": 200, "tracks": []}}
+        u = run_unit(b, self.root)
+        T = self.unit_dir()
+        tr = T / "Files" / "Week 01" / "Transcripts" / "Lecture 1.md"
+        self.assertTrue(tr.exists())
+        text = tr.read_text(encoding="utf-8")
+        self.assertIn("easel: transcript", text)
+        self.assertIn("**[0:00:01]** Welcome to week one.", text)
+        week = (T / "3 Weeks" / "Week 01 - Basics.md").read_text(encoding="utf-8")
+        self.assertIn("Transcript: [Lecture 1](../Files/Week%2001/Transcripts/Lecture%201.md)", week)
+        self.assertNotIn("TRANSCRIPT:", week)
+        self.assertFalse((T / "Files" / "Week 01" / "Transcripts" / "Silent clip.md").exists())
+        self.assertIn("no transcript on Canvas: Silent clip", u.report)
+        self.assertIn("1 transcript saved", u.summary)
+        ok, bad, broken, leftovers, orphans = easel.check_links(T)
+        self.assertEqual((bad, leftovers), (0, []), broken)
+        self.assertNotIn("Files/Week 01/Transcripts/Lecture 1.md", orphans)
+        # a second run changes nothing
+        u2 = run_unit(b, self.root)
+        self.assertEqual(u2.result["transcripts"]["unchanged"], 1)
+        self.assertEqual(u2.result["written"], [])
+        # the student's edit survives
+        tr.write_text(text + "\nMy own line.\n", encoding="utf-8")
+        u3 = run_unit(b, self.root)
+        self.assertEqual(u3.result["transcripts"]["edited"], ["Lecture 1.md"])
+        self.assertIn("My own line.", tr.read_text(encoding="utf-8"))
 
     def test_annotated_feedback(self):
         fb = {"results": [{"key": "7001-601", "status": "ok", "pdf": base64.b64encode(PDF).decode(),
